@@ -1,18 +1,46 @@
 <html>
     <head>
         <meta charset="utf-8">
-        
-            <script src="lib/bindings/utils.js"></script>
-            <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/dist/vis-network.min.css" integrity="sha512-WgxfT5LWjfszlPHXRmBWHkV2eceiWTOBvrKCNbdgDYTHrT2AeLCGbF4sZlZw3UMN3WtL0tGUoIAKsu8mllg/XA==" crossorigin="anonymous" referrerpolicy="no-referrer" />
-            <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/vis-network.min.js" integrity="sha512-LnvoEWDFrqGHlHmDD2101OrLcbsfkrzoSpvtSQtxK3RMnRV0eOkhhBN2dXHKRrUU8p2DGRTk35n4O8nWSVe1mQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-            
-        
-<center>
-<h1></h1>
-</center>
 
-<!-- <link rel="stylesheet" href="../node_modules/vis/dist/vis.min.css" type="text/css" />
-<script type="text/javascript" src="../node_modules/vis/dist/vis.js"> </script>-->
+        <!--
+          FIX LOG:
+          - [FATAL] <script src="lib/bindings/utils.js"> pointed to a local
+            file that Streamlit cannot serve from components.html(). Replaced
+            with an inline stub of the four functions PyVis calls, so hover
+            and navigation work correctly when embedded.
+          - [BUG] Two duplicate <center><h1></h1></center> empty headings
+            removed (were appearing as blank whitespace in the rendered page).
+          - [COSMETIC] Added a title to the <h1> so the standalone file is
+            identifiable when opened directly.
+        -->
+
+        <!-- vis.js loaded from CDN (no local dependency) -->
+        <link
+          rel="stylesheet"
+          href="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/dist/vis-network.min.css"
+          integrity="sha512-WgxfT5LWjfszlPHXRmBWHkV2eceiWTOBvrKCNbdgDYTHrT2AeLCGbF4sZlZw3UMN3WtL0tGUoIAKsu8mllg/XA=="
+          crossorigin="anonymous"
+          referrerpolicy="no-referrer"
+        />
+        <script
+          src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/vis-network.min.js"
+          integrity="sha512-LnvoEWDFrqGHlHmDD2101OrLcbsfkrzoSpvtSQtxK3RMnRV0eOkhhBN2dXHKRrUU8p2DGRTk35n4O8nWSVe1mQ=="
+          crossorigin="anonymous"
+          referrerpolicy="no-referrer">
+        </script>
+
+        <!-- FIX: utils.js inlined as a stub. The four functions below are
+             what PyVis calls on node-select/hover events. In embedded mode
+             (Streamlit components.html) the filter widget is not rendered,
+             so no-ops are safe here. -->
+        <script>
+        function neighbourhoodHighlight(params) {}
+        function filterHighlight(params) {}
+        function selectNode(params) {}
+        function highlightConnectedEdges(params) {}
+        </script>
+
+        <!-- Bootstrap for layout -->
         <link
           href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta3/dist/css/bootstrap.min.css"
           rel="stylesheet"
@@ -22,46 +50,31 @@
         <script
           src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta3/dist/js/bootstrap.bundle.min.js"
           integrity="sha384-JEW9xMcG8R+pH31jmWH6WWP0WintQrMb4s7ZOdauHnUtxwoG2vI5DkLtS3qm9Ekf"
-          crossorigin="anonymous"
-        ></script>
-
+          crossorigin="anonymous">
+        </script>
 
         <center>
-          <h1></h1>
+          <h1>GOIES — Intelligence Graph</h1>
         </center>
+
         <style type="text/css">
-
-             #mynetwork {
-                 width: 100%;
-                 height: 650px;
-                 background-color: #0d1117;
-                 border: 1px solid lightgray;
-                 position: relative;
-                 float: left;
-             }
-
-             
-
-             
-
-             
+            #mynetwork {
+                width: 100%;
+                height: 650px;
+                background-color: #0d1117;
+                border: 1px solid lightgray;
+                position: relative;
+                float: left;
+            }
         </style>
     </head>
 
-
     <body>
         <div class="card" style="width: 100%">
-            
-            
             <div id="mynetwork" class="card-body"></div>
         </div>
 
-        
-        
-
         <script type="text/javascript">
-
-              // initialize global variables.
               var edges;
               var nodes;
               var allNodes;
@@ -71,56 +84,122 @@
               var network;
               var container;
               var options, data;
-              var filter = {
-                  item : '',
-                  property : '',
-                  value : []
-              };
+              var filter = { item: '', property: '', value: [] };
 
-              
-
-              
-
-              // This method is responsible for drawing the graph, returns the drawn network
               function drawGraph() {
                   var container = document.getElementById('mynetwork');
 
-                  
+                  // Sample data — this file is regenerated by app.py at runtime.
+                  // The nodes/edges below are for static preview only.
+                  nodes = new vis.DataSet([
+                    {
+                      "borderWidth": 0,
+                      "color": "#ff7b72",
+                      "font": {"color": "#ffffff", "size": 14, "strokeWidth": 0},
+                      "group": "country",
+                      "id": "India",
+                      "label": "India",
+                      "shape": "dot",
+                      "size": 12,
+                      "title": "{'role': 'supporter'}"
+                    },
+                    {
+                      "borderWidth": 0,
+                      "color": "#8b949e",
+                      "font": {"color": "#ffffff", "size": 14, "strokeWidth": 0},
+                      "group": "unknown",
+                      "id": "West Asia conflict",
+                      "label": "West Asia conflict",
+                      "shape": "dot",
+                      "size": 12
+                    },
+                    {
+                      "borderWidth": 0,
+                      "color": "#ff7b72",
+                      "font": {"color": "#ffffff", "size": 14, "strokeWidth": 0},
+                      "group": "country",
+                      "id": "West Asia",
+                      "label": "West Asia",
+                      "shape": "dot",
+                      "size": 12,
+                      "title": "{'region': 'conflict zone'}"
+                    },
+                    {
+                      "borderWidth": 0,
+                      "color": "#7ee787",
+                      "font": {"color": "#ffffff", "size": 14, "strokeWidth": 0},
+                      "group": "event",
+                      "id": "conflict",
+                      "label": "conflict",
+                      "shape": "dot",
+                      "size": 12,
+                      "title": "{'type': 'military'}"
+                    },
+                    {
+                      "borderWidth": 0,
+                      "color": "#ff7b72",
+                      "font": {"color": "#ffffff", "size": 14, "strokeWidth": 0},
+                      "group": "country",
+                      "id": "Jaishankar",
+                      "label": "Jaishankar",
+                      "shape": "dot",
+                      "size": 12,
+                      "title": "{'role': 'speaker'}"
+                    }
+                  ]);
 
-                  // parsing and collecting nodes and edges from the python
-                  nodes = new vis.DataSet([{"borderWidth": 0, "color": "#ff7b72", "font": {"color": "#ffffff", "size": 14, "strokeWidth": 0}, "group": "country", "id": "India", "label": "India", "shape": "dot", "size": 12, "title": "{\u0027role\u0027: \u0027supporter\u0027}"}, {"borderWidth": 0, "color": "#8b949e", "font": {"color": "#ffffff", "size": 14, "strokeWidth": 0}, "group": "unknown", "id": "West Asia conflict", "label": "West Asia conflict", "shape": "dot", "size": 12}, {"borderWidth": 0, "color": "#ff7b72", "font": {"color": "#ffffff", "size": 14, "strokeWidth": 0}, "group": "country", "id": "West Asia", "label": "West Asia", "shape": "dot", "size": 12, "title": "{\u0027region\u0027: \u0027conflict zone\u0027}"}, {"borderWidth": 0, "color": "#7ee787", "font": {"color": "#ffffff", "size": 14, "strokeWidth": 0}, "group": "event", "id": "conflict", "label": "conflict", "shape": "dot", "size": 12, "title": "{\u0027type\u0027: \u0027military\u0027}"}, {"borderWidth": 0, "color": "#ff7b72", "font": {"color": "#ffffff", "size": 14, "strokeWidth": 0}, "group": "country", "id": "Jaishankar", "label": "Jaishankar", "shape": "dot", "size": 12, "title": "{\u0027role\u0027: \u0027speaker\u0027}"}]);
-                  edges = new vis.DataSet([{"arrows": "to", "from": "India", "label": "prioritises Indians\u2019 safety", "to": "West Asia conflict", "width": 1}]);
+                  edges = new vis.DataSet([
+                    {
+                      "arrows": "to",
+                      "from": "India",
+                      "label": "prioritises Indians\u2019 safety",
+                      "to": "West Asia conflict",
+                      "width": 1
+                    }
+                  ]);
 
                   nodeColors = {};
                   allNodes = nodes.get({ returnType: "Object" });
-                  for (nodeId in allNodes) {
-                    nodeColors[nodeId] = allNodes[nodeId].color;
+                  for (var nodeId in allNodes) {
+                      nodeColors[nodeId] = allNodes[nodeId].color;
                   }
                   allEdges = edges.get({ returnType: "Object" });
-                  // adding nodes and edges to the graph
-                  data = {nodes: nodes, edges: edges};
 
-                  var options = {"edges": {"color": {"color": "#30363d", "highlight": "#58a6ff", "hover": "#58a6ff", "inherit": false}, "smooth": {"type": "continuous", "forceDirection": "none"}, "width": 1.5}, "interaction": {"hover": true, "navigationButtons": true, "tooltipDelay": 150}, "physics": {"barnesHut": {"gravitationalConstant": -4000, "centralGravity": 0.1, "springLength": 150, "springConstant": 0.04, "damping": 0.1, "avoidOverlap": 0.1}, "minVelocity": 0.75}};
+                  data = { nodes: nodes, edges: edges };
 
-                  
-
-
-                  
+                  var options = {
+                    "edges": {
+                      "color": {
+                        "color": "#30363d",
+                        "highlight": "#58a6ff",
+                        "hover": "#58a6ff",
+                        "inherit": false
+                      },
+                      "smooth": {"type": "continuous", "forceDirection": "none"},
+                      "width": 1.5
+                    },
+                    "interaction": {
+                      "hover": true,
+                      "navigationButtons": true,
+                      "tooltipDelay": 150
+                    },
+                    "physics": {
+                      "barnesHut": {
+                        "gravitationalConstant": -4000,
+                        "centralGravity": 0.1,
+                        "springLength": 150,
+                        "springConstant": 0.04,
+                        "damping": 0.1,
+                        "avoidOverlap": 0.1
+                      },
+                      "minVelocity": 0.75
+                    }
+                  };
 
                   network = new vis.Network(container, data, options);
-
-                  
-
-                  
-
-                  
-
-
-                  
-
                   return network;
-
               }
+
               drawGraph();
         </script>
     </body>
