@@ -671,6 +671,13 @@ kbd {
 </style>
 </head>
 <body>
+  <textarea id="inputText" rows="4" cols="60">
+Google develops AI systems. India hosts an AI summit.
+</textarea>
+
+<br><br>
+
+<button onclick="extractText()">Extract Knowledge</button>
 
 <!-- ── GRAPH ──────────────────────────────────────────────────────────────── -->
 <div id="graph-container"></div>
@@ -1008,6 +1015,7 @@ const UI = {
     badge.style.background  = color + '11';
 
     document.getElementById('inspector-name').textContent = nodeId;
+                  
 
     // Attributes
     const attrsEl = document.getElementById('inspector-attrs');
@@ -1418,6 +1426,37 @@ UI.toggleContext = function(msgId) {
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => App.init());
+</script>
+<script>
+
+async function extractText(){
+
+const text = document.getElementById("inputText").value
+
+await fetch("/api/extract",{
+method:"POST",
+headers:{
+"Content-Type":"application/json"
+},
+body: JSON.stringify({
+text:text,
+model:"llama3.2"
+})
+})
+
+await loadGraph()
+
+}
+
+async function loadGraph(){
+
+const res = await fetch("/api/graph")
+const graph = await res.json()
+
+console.log(graph)
+
+}
+
 </script>
 </body>
 </html>

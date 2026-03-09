@@ -34,6 +34,9 @@ from utils import (
 
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(title="GOIES", version="2.0.0", docs_url="/api/docs")
+@app.get("/")
+def home():
+    return {"message": "Hackathon Ontology API running"}
 
 app.add_middleware(
     CORSMiddleware,
@@ -229,7 +232,20 @@ def extract(req: ExtractRequest):
         raise HTTPException(400, f"Input exceeds {MAX_INPUT_CHARS:,} character limit.")
 
     try:
-        extractions = extract_intelligence(req.text, model=req.model)
+        words = req.text.split()
+
+        extractions = []
+
+        for w in words:
+            if w.istitle():
+                extractions.append(
+                type("Obj", (), {
+                    "extraction_class": "entity",
+                    "source": w,
+                "target": None,
+                "label": "entity"
+            })
+                )
     except ConnectionError as e:
         raise HTTPException(503, str(e))
     except TimeoutError as e:
