@@ -1662,7 +1662,7 @@ document.querySelectorAll('.nav-tab').forEach(btn => {
     const panel = document.getElementById(`panel-${tab}`);
     if (panel) panel.classList.add('active');
     // Tab-specific actions
-    if (tab === 'graph')     { if (!S.network) loadGraphData().then(initOrUpdateGraph); else S.network.fit(); }
+    if (tab === 'graph')     { if (!S.network) loadGraphData().then(initOrUpdateGraph); else { initOrUpdateGraph(); S.network.fit(); } }
     if (tab === 'geo')       { if (!S.map) initOrUpdateMap(); else loadGeoData(); }
     if (tab === 'analytics') { renderAnalytics(); }
     if (tab === 'timeline')  { loadTimeline(); }
@@ -1676,11 +1676,13 @@ document.querySelectorAll('.nav-tab').forEach(btn => {
 document.getElementById('model-select').addEventListener('change', e => { S.model = e.target.value; });
 
 /* ── FILE UPLOAD ─────────────────────────────────────────────────────────────── */
-const dropZone = document.getElementById('drop-zone');
+/* ── FILE UPLOAD STATE ───────────────────────────────────────────────────────── */
+// FIX-3: Store file text here so the extract handler always reads the right source
+let _fileText = '';
 const fileInput = document.getElementById('file-input');
 dropZone.addEventListener('click', () => fileInput.click());
 dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
-dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('dragover'); dropZone.classList.remove("dragover");; });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
 dropZone.addEventListener('drop', e => {
   e.preventDefault(); dropZone.style.borderColor = 'var(--border)';
   const file = e.dataTransfer.files[0];
@@ -1697,10 +1699,10 @@ async function handleFileSelect(file) {
     const r = await fetch('/api/ingest/file', { method: 'POST', body: fd });
     if (!r.ok) throw new Error((await r.json()).detail);
     const data = await r.json();
-    // Switch to text mode with fetched content
-    document.querySelector('[data-mode=text]').click();
-    document.getElementById('extract-text').value = data.text || '';
-    toast(`File loaded: ${data.filename}`, 'success');
+    // FIX-3: Store into _fileText — don't switch tabs (that caused a race condition)
+    _fileText = data.text || '';
+    nameEl.textContent = `${file.name}  (${_fileText.length.toLocaleString()} chars loaded)`;
+    toast(`File loaded: ${data.filename} — click EXTRACT to process`, 'success');
   } catch(e) { toast(`File error: ${e.message}`, 'error'); }
 }
 
@@ -1735,7 +1737,7 @@ document.getElementById('btn-extract').addEventListener('click', async () => {
   let text = '';
   if (mode === 'text') text = document.getElementById('extract-text').value.trim();
   else if (mode === 'url') text = document.getElementById('url-text-preview').value.trim();
-  else if (mode === 'file') text = document.getElementById('extract-text').value.trim();
+  else if (mode === 'file') text = _fileText; // FIX-3: was reading wrong textarea
 
   if (!text) { toast('No text to extract from', 'warn'); return; }
   const model = document.getElementById('extract-model').value;
@@ -1785,6 +1787,13 @@ document.getElementById('btn-extract').addEventListener('click', async () => {
             S.graph = payload.vis;
             S.analytics = payload.analytics;
             updateHeader(payload.analytics);
+            // FIX-1: Live-push updated nodes/edges into the existing Vis network
+            if (S.network) {
+              S.network.setData({
+                nodes: new vis.DataSet(S.graph.nodes || []),
+                edges: new vis.DataSet(S.graph.edges || []),
+              });
+            }
           }
         } catch {}
       }
@@ -1856,8 +1865,8 @@ function inspectNode(nodeId) {
   const color = GROUP_COLORS[nodeData.group] || '#8b949e';
   const edges_out = (S.graph.edges || []).filter(e => e.from === nodeId);
   const edges_in  = (S.graph.edges || []).filter(e => e.to === nodeId);
-  let attrs = {};
-  try { attrs = typeof nodeData.title === 'string' && nodeData.title.startsWith('{') ? eval('(' + nodeData.title + ')') : {}; } catch {}
+  // FIX-4: Use pre-parsed _attrs dict from server — never eval() user-controlled data
+  const attrs = (typeof nodeData._attrs === 'object' && nodeData._attrs) ? nodeData._attrs : {};
   inspector.innerHTML = `
     <div class="node-name">${nodeId}</div>
     <div class="node-group-badge" style="background:${color}22;border:1px solid ${color}44;color:${color}">${(nodeData.group||'unknown').toUpperCase()}</div>

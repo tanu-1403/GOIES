@@ -1,11 +1,21 @@
 """
 utils.py — GOIES Shared Utilities
 Handles: graph persistence, entity resolution, analytics, text chunking, exports.
+
+Fixes applied:
+  FIX-1  CHUNK_MAX_CHARS raised 4_000 → 8_000; overlap raised to 400.
+  FIX-2  save_graph() rotates snapshots (MAX_SNAPSHOTS=50) to prevent disk exhaustion.
+  FIX-3  In-function stdlib imports hoisted to module level.
+  FIX-4  Bare except clauses replaced with specific exception types.
 """
 
+import ast
 import csv
+import datetime
 import io
+import itertools
 import json
+import logging
 import pathlib
 import re
 from difflib import SequenceMatcher
@@ -13,10 +23,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import networkx as nx
 
+logger = logging.getLogger("goies.utils")
+
 GRAPH_SAVE_PATH = pathlib.Path("goies_graph.json")
-CHUNK_MAX_CHARS = 4_000
-CHUNK_OVERLAP = 200
+CHUNK_MAX_CHARS = 8_000   # FIX-1: was 4_000 — doubled to eliminate ~8 K effective ceiling
+CHUNK_OVERLAP   = 400     # FIX-1: was 200 — raised proportionally
 FUZZY_THRESHOLD = 0.82
+MAX_SNAPSHOTS   = 50      # FIX-2: keep at most this many snapshot files on disk
 
 
 # ── Text Chunking ─────────────────────────────────────────────────────────────
@@ -67,29 +80,26 @@ def merge_nodes(graph: nx.DiGraph, source_node: str, target_node: str) -> bool:
         save_graph(graph)
         return True
 
-    # Outgoing edges
     for _, v, data in list(graph.out_edges(source_node, data=True)):
         if v == target_node:
             continue
         if graph.has_edge(target_node, v):
-            graph[target_node][v]["weight"] = graph[target_node][v].get(
-                "weight", 1
-            ) + data.get("weight", 1)
+            graph[target_node][v]["weight"] = (
+                graph[target_node][v].get("weight", 1) + data.get("weight", 1)
+            )
         else:
             graph.add_edge(target_node, v, **data)
 
-    # Incoming edges
     for u, _, data in list(graph.in_edges(source_node, data=True)):
         if u == target_node:
             continue
         if graph.has_edge(u, target_node):
-            graph[u][target_node]["weight"] = graph[u][target_node].get(
-                "weight", 1
-            ) + data.get("weight", 1)
+            graph[u][target_node]["weight"] = (
+                graph[u][target_node].get("weight", 1) + data.get("weight", 1)
+            )
         else:
             graph.add_edge(u, target_node, **data)
 
-    # Copy attributes if target doesn't have them
     for k, v in graph.nodes[source_node].items():
         if k not in graph.nodes[target_node] and k != "id":
             graph.nodes[target_node][k] = v
@@ -104,16 +114,20 @@ def save_graph(graph: nx.DiGraph, path: pathlib.Path = GRAPH_SAVE_PATH) -> None:
     data = nx.node_link_data(graph)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
-    # Save a timestamped snapshot
-    import datetime
-
+    # FIX-2: Timestamped snapshot with automatic rotation
     snapshots_dir = pathlib.Path("goies_snapshots")
     snapshots_dir.mkdir(exist_ok=True)
-    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
-        "%Y-%m-%dT%H%M%SZ"
-    )
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
     snapshot_path = snapshots_dir / f"goies_graph_v_{timestamp}.json"
     snapshot_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    # Rotate: delete oldest snapshots beyond MAX_SNAPSHOTS
+    existing = sorted(snapshots_dir.glob("goies_graph_v_*.json"))
+    for old in existing[:-MAX_SNAPSHOTS]:
+        try:
+            old.unlink()
+        except OSError as exc:
+            logger.warning("Could not delete old snapshot %s: %s", old, exc)
 
 
 def load_graph(path: pathlib.Path = GRAPH_SAVE_PATH) -> nx.DiGraph:
@@ -122,31 +136,17 @@ def load_graph(path: pathlib.Path = GRAPH_SAVE_PATH) -> nx.DiGraph:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return nx.node_link_graph(data, directed=True, multigraph=False)
-    except Exception:
+    except (json.JSONDecodeError, ValueError, KeyError) as exc:  # FIX-4
+        logger.warning("Could not load graph from %s: %s — starting fresh.", path, exc)
         return nx.DiGraph()
 
 
 # ── Graph Analytics ───────────────────────────────────────────────────────────
 def _is_hostile(label: str) -> bool:
     keywords = [
-        "sanction",
-        "attack",
-        "invade",
-        "bomb",
-        "missile",
-        "strike",
-        "kill",
-        "threaten",
-        "blockade",
-        "terrorize",
-        "restrict",
-        "ban",
-        "expel",
-        "dispute",
-        "tension",
-        "pressure",
-        "cyber",
-        "confront",
+        "sanction", "attack", "invade", "bomb", "missile", "strike", "kill",
+        "threaten", "blockade", "terrorize", "restrict", "ban", "expel",
+        "dispute", "tension", "pressure", "cyber", "confront",
     ]
     label = label.lower()
     return any(k in label for k in keywords)
@@ -154,14 +154,7 @@ def _is_hostile(label: str) -> bool:
 
 def _is_cooperative(label: str) -> bool:
     keywords = [
-        "cooperate",
-        "ally",
-        "partner",
-        "invest",
-        "aid",
-        "support",
-        "trade",
-        "treaty",
+        "cooperate", "ally", "partner", "invest", "aid", "support", "trade", "treaty",
     ]
     label = label.lower()
     return any(k in label for k in keywords)
@@ -169,7 +162,7 @@ def _is_cooperative(label: str) -> bool:
 
 def detect_conflicts(graph: nx.DiGraph) -> List[Dict[str, Any]]:
     conflicts = []
-    checked = set()
+    checked: set = set()
     for u, v in graph.edges():
         pair = tuple(sorted([str(u), str(v)]))
         if pair in checked:
@@ -185,10 +178,8 @@ def detect_conflicts(graph: nx.DiGraph) -> List[Dict[str, Any]]:
         if len(edges) < 2:
             continue
 
-        has_hostile = False
-        has_coop = False
-        h_edge = None
-        c_edge = None
+        has_hostile, has_coop = False, False
+        h_edge, c_edge = None, None
 
         for src, tgt, data in edges:
             lbl = data.get("label", "")
@@ -213,13 +204,10 @@ def graph_health_score(graph: nx.DiGraph) -> Dict[str, Any]:
     labels = [d.get("label", "") for _, _, d in graph.edges(data=True)]
     label_diversity = min(1.0, len(set(labels)) / max(len(labels) * 0.3, 1))
 
-    # proxy for edge richness
     avg_edges = graph.number_of_edges() / max(graph.number_of_nodes(), 1)
     edge_density_score = min(1.0, avg_edges / 3.0)
 
-    health = round(
-        (group_diversity * 33 + label_diversity * 33 + edge_density_score * 34)
-    )
+    health = round(group_diversity * 33 + label_diversity * 33 + edge_density_score * 34)
 
     suggestions = []
     if group_diversity < 0.6:
@@ -259,8 +247,8 @@ def get_graph_analytics(
         try:
             bet = nx.betweenness_centrality(graph)
             top_betweenness = sorted(bet.items(), key=lambda x: x[1], reverse=True)[:5]
-        except Exception:
-            pass
+        except (nx.NetworkXError, nx.NetworkXException) as exc:  # FIX-4
+            logger.debug("Betweenness centrality failed: %s", exc)
 
     group_counts: Dict[str, int] = {}
     for _, data in graph.nodes(data=True):
@@ -303,7 +291,7 @@ def retrieve_graph_context(
         w for w in re.sub(r"[^\w\s]", "", query.lower()).split() if len(w) > 2
     )
 
-    seed_nodes = set()
+    seed_nodes: set = set()
     for node in graph.nodes:
         node_words = set(re.sub(r"[^\w\s]", "", node.lower()).split())
         if query_words & node_words:
@@ -311,7 +299,7 @@ def retrieve_graph_context(
 
     visited, frontier = set(seed_nodes), set(seed_nodes)
     for _ in range(max_hops):
-        next_frontier = set()
+        next_frontier: set = set()
         for node in frontier:
             next_frontier.update(graph.predecessors(node))
             next_frontier.update(graph.successors(node))
@@ -328,8 +316,6 @@ def retrieve_graph_context(
             relevant.append(f"- {u} → {rel} → {v}{conf_str}")
 
     if not relevant:
-        import itertools
-
         edges = list(itertools.islice(graph.edges(data=True), max_edges))
         return "\n".join(
             f"- {u} → {d.get('label', 'connects to')} → {v}" for u, v, d in edges
