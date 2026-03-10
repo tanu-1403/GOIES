@@ -1,136 +1,369 @@
 """
-reporter.py — Intelligence Report Generator
-Generates PDF briefs from the intelligence graph.
+reporter.py — GOIES Intelligence Report Generator v2
+Generates PDF (via reportlab) and Markdown intelligence briefings.
+Falls back gracefully if reportlab is not installed.
 """
 
+from __future__ import annotations
+
+import datetime
 import io
+import json
+from typing import Any, Dict, List, Optional
+
 import networkx as nx
-from datetime import datetime
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
 
-from utils import get_graph_analytics
+# ── Markdown Report ───────────────────────────────────────────────────────────
 
-def generate_report(graph: nx.DiGraph, focus_entities: list[str] = None, summary: str = "") -> bytes:
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter,
-                            rightMargin=72, leftMargin=72,
-                            topMargin=72, bottomMargin=18)
-    styles = getSampleStyleSheet()
-    
-    # Custom styles
-    title_style = styles['Heading1']
-    title_style.alignment = 1 # Center
-    
-    h2_style = styles['Heading2']
-    body_style = styles['Normal']
-    
-    Story = []
-    
-    # Title
-    Story.append(Paragraph("GOIES Intelligence Brief", title_style))
-    Story.append(Spacer(1, 0.25 * inch))
-    
-    # Metadata
-    date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
-    Story.append(Paragraph(f"<b>Generated:</b> {date_str}", body_style))
+
+def generate_markdown_report(
+    graph: nx.DiGraph,
+    focus_entities: List[str],
+    llm_summary: str = "",
+) -> str:
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    n_nodes = graph.number_of_nodes()
+    n_edges = graph.number_of_edges()
+
+    lines = [
+        "# ◈ GOIES Intelligence Brief",
+        f"**Classification:** UNCLASSIFIED // FOR OFFICIAL USE",
+        f"**Generated:** {now}",
+        f"**Graph State:** {n_nodes} entities · {n_edges} relationships",
+        "",
+        "---",
+        "",
+    ]
+
+    if llm_summary:
+        lines += [
+            "## Executive Summary",
+            "",
+            llm_summary,
+            "",
+            "---",
+            "",
+        ]
+
     if focus_entities:
-        Story.append(Paragraph(f"<b>Focus Entities:</b> {', '.join(focus_entities)}", body_style))
-    Story.append(Spacer(1, 0.2 * inch))
+        lines += ["## Entity Dossiers", ""]
+        for entity in focus_entities:
+            if not graph.has_node(entity):
+                continue
+            data = graph.nodes[entity]
+            group = data.get("group", "unknown")
+            confidence = data.get("confidence", 1.0)
 
-    # Executive Summary (LLM)
-    if summary:
-        Story.append(Paragraph("Executive Strategic Summary", h2_style))
-        for para in summary.split('\n\n'):
-            Story.append(Paragraph(para, body_style))
-            Story.append(Spacer(1, 0.1 * inch))
-        Story.append(Spacer(1, 0.2 * inch))
-    
-    # Analytics
-    analytics = get_graph_analytics(graph)
-    Story.append(Paragraph("Graph Analytics Overview", h2_style))
-    Story.append(Paragraph(f"• Total Entities: {analytics['nodes']}", body_style))
-    Story.append(Paragraph(f"• Total Relationships: {analytics['edges']}", body_style))
-    Story.append(Paragraph(f"• Network Density: {analytics['density']}", body_style))
-    Story.append(Spacer(1, 0.2 * inch))
-    
-    # Top Entities
-    top_degree = analytics.get('top_degree', [])
-    if top_degree:
-        Story.append(Paragraph("Key Actors (By Connections)", h2_style))
-        for n, score in top_degree:
-            Story.append(Paragraph(f"• {n} ({score:.2f})", body_style))
-        Story.append(Spacer(1, 0.2 * inch))
-        
-    # Conflicts
-    conflicts = analytics.get('conflicts', [])
-    if conflicts:
-        Story.append(Paragraph("Detected Conflicts", h2_style))
-        for c in conflicts[:10]: # Limit to top 10
-            u, v = c['nodes']
-            Story.append(Paragraph(f"• <b>{u}</b> and <b>{v}</b> have contradictory edges.", body_style))
-        if len(conflicts) > 10:
-            Story.append(Paragraph(f"...and {len(conflicts) - 10} more.", body_style))
-        Story.append(Spacer(1, 0.2 * inch))
-        
-    # Bridge Nodes
-    top_betweenness = analytics.get('top_betweenness', [])
-    if top_betweenness:
-        Story.append(Paragraph("Critical Bridge Nodes", h2_style))
-        for n, score in top_betweenness:
-            Story.append(Paragraph(f"• {n} ({score:.2f})", body_style))
-            
-    doc.build(Story)
-    
-    pdf_bytes = buffer.getvalue()
-    buffer.close()
-    return pdf_bytes
+            lines += [
+                f"### {entity}",
+                f"**Type:** {group.upper()} · **Confidence:** {confidence:.0%}",
+                "",
+            ]
 
-def generate_markdown_report(graph: nx.DiGraph, focus_entities: list[str] = None, summary: str = "") -> str:
-    lines = []
-    lines.append("# GOIES Intelligence Brief\n")
-    
-    date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
-    lines.append(f"**Generated:** {date_str}")
-    if focus_entities:
-        lines.append(f"**Focus Entities:** {', '.join(focus_entities)}")
-    lines.append("\n---\n")
-    
-    if summary:
-        lines.append("## Executive Strategic Summary\n")
-        lines.append(summary + "\n")
-        lines.append("\n---\n")
-        
-    analytics = get_graph_analytics(graph)
-    lines.append("## Graph Analytics Overview\n")
-    lines.append(f"- Total Entities: {analytics['nodes']}")
-    lines.append(f"- Total Relationships: {analytics['edges']}")
-    lines.append(f"- Network Density: {analytics['density']:.4f}\n")
-    
-    top_degree = analytics.get('top_degree', [])
-    if top_degree:
-        lines.append("## Key Actors (By Connections)\n")
-        for n, score in top_degree:
-            lines.append(f"- **{n}** ({score:.2f})")
-        lines.append("")
-        
-    conflicts = analytics.get('conflicts', [])
-    if conflicts:
-        lines.append("## Detected Conflicts\n")
-        for c in conflicts[:10]:
-            u, v = c['nodes']
-            lines.append(f"- **{u}** and **{v}** have contradictory edges.")
-        if len(conflicts) > 10:
-            lines.append(f"- ...and {len(conflicts) - 10} more.\n")
-        else:
+            # Outgoing relationships
+            out_rels = [
+                (v, d.get("label", "relates to"))
+                for _, v, d in graph.out_edges(entity, data=True)
+            ]
+            if out_rels:
+                lines += ["**Actions / Outgoing Relationships:**", ""]
+                for target, label in out_rels[:10]:
+                    lines.append(f"- {entity} → *{label}* → **{target}**")
+                lines.append("")
+
+            # Incoming relationships
+            in_rels = [
+                (u, d.get("label", "relates to"))
+                for u, _, d in graph.in_edges(entity, data=True)
+            ]
+            if in_rels:
+                lines += ["**Receives / Incoming Relationships:**", ""]
+                for source, label in in_rels[:10]:
+                    lines.append(f"- **{source}** → *{label}* → {entity}")
+                lines.append("")
+
+            # Attributes
+            attrs = data.get("attributes", {})
+            if isinstance(attrs, str):
+                try:
+                    import ast
+
+                    attrs = ast.literal_eval(attrs)
+                except Exception:
+                    attrs = {}
+            if attrs and isinstance(attrs, dict):
+                lines += ["**Attributes:**", ""]
+                for k, v in list(attrs.items())[:8]:
+                    lines.append(f"- **{k}:** {v}")
+                lines.append("")
+
+            lines.append("---")
             lines.append("")
-            
-    top_betweenness = analytics.get('top_betweenness', [])
-    if top_betweenness:
-        lines.append("## Critical Bridge Nodes\n")
-        for n, score in top_betweenness:
-            lines.append(f"- **{n}** ({score:.2f})\n")
-            
+
+    # Graph summary table
+    group_counts: Dict[str, int] = {}
+    for _, d in graph.nodes(data=True):
+        g = d.get("group", "unknown")
+        group_counts[g] = group_counts.get(g, 0) + 1
+
+    lines += [
+        "## Graph Composition",
+        "",
+        "| Entity Type | Count |",
+        "|-------------|-------|",
+    ]
+    for g, count in sorted(group_counts.items(), key=lambda x: x[1], reverse=True):
+        lines.append(f"| {g.title()} | {count} |")
+
+    lines += [
+        "",
+        "---",
+        "",
+        "*Report generated by GOIES — Global Ontology Intelligence Engine*",
+        f"*{now}*",
+    ]
+
     return "\n".join(lines)
+
+
+# ── PDF Report ────────────────────────────────────────────────────────────────
+
+
+def generate_report(
+    graph: nx.DiGraph,
+    focus_entities: List[str],
+    llm_summary: str = "",
+) -> bytes:
+    """
+    Generate a PDF report. Returns bytes.
+    Requires reportlab. Falls back to UTF-8 encoded markdown if unavailable.
+    """
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import mm
+        from reportlab.platypus import (
+            HRFlowable,
+            Paragraph,
+            SimpleDocTemplate,
+            Spacer,
+            Table,
+            TableStyle,
+        )
+        from reportlab.lib.enums import TA_LEFT, TA_CENTER
+
+        return _build_pdf(graph, focus_entities, llm_summary)
+    except ImportError:
+        # Graceful fallback
+        md = generate_markdown_report(graph, focus_entities, llm_summary)
+        return md.encode("utf-8")
+
+
+def _build_pdf(
+    graph: nx.DiGraph,
+    focus_entities: List[str],
+    llm_summary: str,
+) -> bytes:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.lib.enums import TA_LEFT, TA_CENTER
+    from reportlab.platypus import (
+        HRFlowable,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        leftMargin=20 * mm,
+        rightMargin=20 * mm,
+        topMargin=20 * mm,
+        bottomMargin=20 * mm,
+        title="GOIES Intelligence Brief",
+        author="GOIES System",
+    )
+
+    # Color palette
+    NAVY = colors.HexColor("#0a1628")
+    CYAN = colors.HexColor("#00d4ff")
+    LIGHT = colors.HexColor("#c8d8e8")
+    MUTED = colors.HexColor("#4a6080")
+    WHITE = colors.white
+    ACCENT = colors.HexColor("#ff4466")
+
+    # Styles
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "GOIESTitle",
+        parent=styles["Title"],
+        fontSize=22,
+        textColor=CYAN,
+        spaceAfter=4,
+        alignment=TA_CENTER,
+        fontName="Helvetica-Bold",
+    )
+    sub_style = ParagraphStyle(
+        "GOIESSub",
+        parent=styles["Normal"],
+        fontSize=9,
+        textColor=MUTED,
+        spaceAfter=2,
+        alignment=TA_CENTER,
+    )
+    h1_style = ParagraphStyle(
+        "GOIESH1",
+        parent=styles["Heading1"],
+        fontSize=13,
+        textColor=CYAN,
+        spaceBefore=12,
+        spaceAfter=4,
+        fontName="Helvetica-Bold",
+    )
+    h2_style = ParagraphStyle(
+        "GOIESH2",
+        parent=styles["Heading2"],
+        fontSize=11,
+        textColor=LIGHT,
+        spaceBefore=8,
+        spaceAfter=3,
+        fontName="Helvetica-Bold",
+    )
+    body_style = ParagraphStyle(
+        "GOIESBody",
+        parent=styles["Normal"],
+        fontSize=9,
+        textColor=colors.HexColor("#94a3b8"),
+        spaceAfter=4,
+        leading=14,
+    )
+    label_style = ParagraphStyle(
+        "GOIESLabel",
+        parent=styles["Normal"],
+        fontSize=8,
+        textColor=MUTED,
+        spaceAfter=2,
+    )
+
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    story = []
+
+    # Header
+    story.append(Paragraph("◈ GOIES INTELLIGENCE BRIEF", title_style))
+    story.append(
+        Paragraph(
+            f"Generated: {now} · {graph.number_of_nodes()} entities · {graph.number_of_edges()} relationships",
+            sub_style,
+        )
+    )
+    story.append(HRFlowable(width="100%", thickness=1, color=CYAN, spaceAfter=10))
+
+    # Executive summary
+    if llm_summary:
+        story.append(Paragraph("EXECUTIVE SUMMARY", h1_style))
+        story.append(Paragraph(llm_summary.replace("\n", "<br/>"), body_style))
+        story.append(HRFlowable(width="100%", thickness=0.5, color=MUTED, spaceAfter=6))
+
+    # Entity dossiers
+    if focus_entities:
+        story.append(Paragraph("ENTITY DOSSIERS", h1_style))
+        for entity in focus_entities:
+            if not graph.has_node(entity):
+                continue
+            data = graph.nodes[entity]
+            group = data.get("group", "unknown").upper()
+            conf = data.get("confidence", 1.0)
+
+            story.append(Paragraph(entity, h2_style))
+            story.append(
+                Paragraph(f"Type: {group}  ·  Confidence: {conf:.0%}", label_style)
+            )
+
+            # Relationships table
+            rows = [["Direction", "Actor", "Relationship"]]
+            for _, v, d in list(graph.out_edges(entity, data=True))[:8]:
+                rows.append(["→ OUT", v, d.get("label", "")])
+            for u, _, d in list(graph.in_edges(entity, data=True))[:8]:
+                rows.append(["← IN", u, d.get("label", "")])
+
+            if len(rows) > 1:
+                tbl = Table(rows, colWidths=[25 * mm, 50 * mm, 80 * mm])
+                tbl.setStyle(
+                    TableStyle(
+                        [
+                            ("BACKGROUND", (0, 0), (-1, 0), NAVY),
+                            ("TEXTCOLOR", (0, 0), (-1, 0), CYAN),
+                            ("FONTSIZE", (0, 0), (-1, -1), 8),
+                            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                            (
+                                "ROWBACKGROUNDS",
+                                (0, 1),
+                                (-1, -1),
+                                [
+                                    colors.HexColor("#080f1a"),
+                                    colors.HexColor("#0c1829"),
+                                ],
+                            ),
+                            ("TEXTCOLOR", (0, 1), (-1, -1), colors.HexColor("#94a3b8")),
+                            ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#1a3a5c")),
+                            ("TOPPADDING", (0, 0), (-1, -1), 3),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                        ]
+                    )
+                )
+                story.append(tbl)
+            story.append(Spacer(1, 6 * mm))
+
+    # Graph composition table
+    story.append(HRFlowable(width="100%", thickness=0.5, color=MUTED, spaceAfter=6))
+    story.append(Paragraph("GRAPH COMPOSITION", h1_style))
+    group_counts: Dict[str, int] = {}
+    for _, d in graph.nodes(data=True):
+        g = d.get("group", "unknown")
+        group_counts[g] = group_counts.get(g, 0) + 1
+
+    comp_rows = [["Entity Type", "Count"]]
+    for g, cnt in sorted(group_counts.items(), key=lambda x: x[1], reverse=True):
+        comp_rows.append([g.title(), str(cnt)])
+
+    comp_tbl = Table(comp_rows, colWidths=[80 * mm, 30 * mm])
+    comp_tbl.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), NAVY),
+                ("TEXTCOLOR", (0, 0), (-1, 0), CYAN),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                (
+                    "ROWBACKGROUNDS",
+                    (0, 1),
+                    (-1, -1),
+                    [colors.HexColor("#080f1a"), colors.HexColor("#0c1829")],
+                ),
+                ("TEXTCOLOR", (0, 1), (-1, -1), colors.HexColor("#94a3b8")),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#1a3a5c")),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]
+        )
+    )
+    story.append(comp_tbl)
+
+    # Footer
+    story.append(Spacer(1, 10 * mm))
+    story.append(HRFlowable(width="100%", thickness=1, color=CYAN, spaceAfter=4))
+    story.append(
+        Paragraph(
+            "GOIES — Global Ontology Intelligence Engine · UNCLASSIFIED", sub_style
+        )
+    )
+
+    doc.build(story)
+    return buf.getvalue()

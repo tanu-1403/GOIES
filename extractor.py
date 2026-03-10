@@ -65,22 +65,22 @@ OUTPUT RULES:
   3. Every Relationship MUST have both "source" and "target".
 
 JSON SCHEMA:
-{
+{{
   "extractions": [
-    {
+    {{
       "extraction_class": "Country",
       "extraction_text": "United States",
-      "attributes": {"role": "instigator"},
+      "attributes": {{"role": "instigator"}},
       "confidence": 0.97
-    },
-    {
+    }},
+    {{
       "extraction_class": "Relationship",
       "extraction_text": "imposes sanctions on",
-      "attributes": {"source": "United States", "target": "Iran"},
+      "attributes": {{"source": "United States", "target": "Iran"}},
       "confidence": 0.95
-    }
+    }}
   ]
-}"""
+}}"""
 
 
 def _call_ollama(prompt: str, model: str) -> str:
@@ -165,11 +165,7 @@ def extract_intelligence(
         )
         raw = _call_ollama(prompt, model)
         for ext in _parse_extractions(raw):
-            key = (
-                ext.extraction_class.lower(),
-                ext.extraction_text.lower(),
-                json.dumps(ext.attributes, sort_keys=True),
-            )
+            key = (ext.extraction_class.lower(), ext.extraction_text.lower())
             if key not in seen:
                 seen.add(key)
                 all_extractions.append(ext)
@@ -233,7 +229,3 @@ def check_ollama_health() -> Dict[str, Any]:
         }
     except Exception as e:
         return {"online": False, "models": [], "error": str(e)}
-
-
-extract_intelligence()
-extract_intelligence_stream()

@@ -3,6 +3,7 @@ geo.py — Geo-positional tension engine
 Calculates tension scores for countries in the intelligence graph.
 """
 
+import ast
 import json
 from typing import Dict, List, Any
 import networkx as nx
@@ -136,8 +137,8 @@ def _is_military_event(node_id: str, graph: nx.DiGraph) -> bool:
     attr = data.get("attributes", {})
     if isinstance(attr, str):
         try:
-            attr = eval(attr)
-        except:
+            attr = ast.literal_eval(attr)
+        except Exception:
             attr = {}
 
     # Simple heuristic
@@ -167,8 +168,8 @@ def calculate_country_tensions(
         for _, _, data in graph.in_edges(node, data=True):
             score += _edge_score(data.get("label", "")) * 0.9
 
-        # Military event bonus
-        for _, neighbor in list(graph.out_edges(node)) + list(graph.in_edges(node)):
+        # Military event bonus — iterate successors and predecessors
+        for neighbor in list(graph.successors(node)) + list(graph.predecessors(node)):
             if graph.nodes[neighbor].get("group", "").lower() == "event":
                 if _is_military_event(neighbor, graph):
                     score += 7.0

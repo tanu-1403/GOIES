@@ -10,17 +10,13 @@ import pathlib
 import re
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
-import time
+
 import networkx as nx
 
 GRAPH_SAVE_PATH = pathlib.Path("goies_graph.json")
 CHUNK_MAX_CHARS = 4_000
 CHUNK_OVERLAP = 200
 FUZZY_THRESHOLD = 0.82
-
-
-SNAPSHOT_INTERVAL = 60
-_last_snapshot_time = 0
 
 
 # ── Text Chunking ─────────────────────────────────────────────────────────────

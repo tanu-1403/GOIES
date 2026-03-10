@@ -1,11 +1,34 @@
+# GOIES v3 — Production Requirements
+# Install: pip install -r requirements.txt
+
+# ── Core API & Server ──────────────────────────────────────────────────────────
 fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
+pydantic>=2.0.0
+
+# ── Graph Engine ──────────────────────────────────────────────────────────────
 networkx>=3.2
-pyvis>=0.3.2
+
+# ── HTTP / LLM ────────────────────────────────────────────────────────────────
 requests>=2.31.0
-python-multipart>=0.0.9
-httpx>=0.27.0
-feedparser>=6.0.11
-pypdf2>=3.0.1
-python-docx>=1.1.0
-reportlab>=4.1.0
+httpx>=0.27.0             # URL ingestion
+
+# ── Document Parsing ─────────────────────────────────────────────────────────
+pypdf>=4.0.0              # PDF parsing (maintained fork of PyPDF2)
+python-docx>=1.1.0        # DOCX parsing
+python-multipart>=0.0.9   # File upload support in FastAPI
+
+# ── Text Extraction from URLs ─────────────────────────────────────────────────
+readability-lxml>=0.8.1   # Article extraction (preferred)
+beautifulsoup4>=4.12.0    # Fallback HTML parsing
+lxml>=5.1.0               # Required by readability-lxml
+
+# ── Report Generation ─────────────────────────────────────────────────────────
+reportlab>=4.1.0          # PDF report generation
+
+# ── RSS Ingestion (optional) ──────────────────────────────────────────────────
+# feedparser>=6.0.11
+
+# ── Dev / Testing ─────────────────────────────────────────────────────────────
+# pytest>=8.0
+# httpx[test]
