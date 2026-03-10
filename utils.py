@@ -10,13 +10,17 @@ import pathlib
 import re
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
-
+import time
 import networkx as nx
 
 GRAPH_SAVE_PATH = pathlib.Path("goies_graph.json")
 CHUNK_MAX_CHARS = 4_000
 CHUNK_OVERLAP = 200
 FUZZY_THRESHOLD = 0.82
+
+
+SNAPSHOT_INTERVAL = 60
+_last_snapshot_time = 0
 
 
 # ── Text Chunking ─────────────────────────────────────────────────────────────
@@ -61,7 +65,7 @@ def resolve_node_name(graph: nx.DiGraph, raw_name: str) -> str:
 def merge_nodes(graph: nx.DiGraph, source_node: str, target_node: str) -> bool:
     if source_node not in graph or source_node == target_node:
         return False
-        
+
     if target_node not in graph:
         nx.relabel_nodes(graph, {source_node: target_node}, copy=False)
         save_graph(graph)
@@ -69,23 +73,29 @@ def merge_nodes(graph: nx.DiGraph, source_node: str, target_node: str) -> bool:
 
     # Outgoing edges
     for _, v, data in list(graph.out_edges(source_node, data=True)):
-        if v == target_node: continue
+        if v == target_node:
+            continue
         if graph.has_edge(target_node, v):
-            graph[target_node][v]['weight'] = graph[target_node][v].get('weight', 1) + data.get('weight', 1)
+            graph[target_node][v]["weight"] = graph[target_node][v].get(
+                "weight", 1
+            ) + data.get("weight", 1)
         else:
             graph.add_edge(target_node, v, **data)
-            
+
     # Incoming edges
     for u, _, data in list(graph.in_edges(source_node, data=True)):
-        if u == target_node: continue
+        if u == target_node:
+            continue
         if graph.has_edge(u, target_node):
-            graph[u][target_node]['weight'] = graph[u][target_node].get('weight', 1) + data.get('weight', 1)
+            graph[u][target_node]["weight"] = graph[u][target_node].get(
+                "weight", 1
+            ) + data.get("weight", 1)
         else:
             graph.add_edge(u, target_node, **data)
-            
+
     # Copy attributes if target doesn't have them
     for k, v in graph.nodes[source_node].items():
-        if k not in graph.nodes[target_node] and k != 'id':
+        if k not in graph.nodes[target_node] and k != "id":
             graph.nodes[target_node][k] = v
 
     graph.remove_node(source_node)
@@ -97,12 +107,15 @@ def merge_nodes(graph: nx.DiGraph, source_node: str, target_node: str) -> bool:
 def save_graph(graph: nx.DiGraph, path: pathlib.Path = GRAPH_SAVE_PATH) -> None:
     data = nx.node_link_data(graph)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    
+
     # Save a timestamped snapshot
     import datetime
+
     snapshots_dir = pathlib.Path("goies_snapshots")
     snapshots_dir.mkdir(exist_ok=True)
-    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H%M%SZ"
+    )
     snapshot_path = snapshots_dir / f"goies_graph_v_{timestamp}.json"
     snapshot_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -119,36 +132,68 @@ def load_graph(path: pathlib.Path = GRAPH_SAVE_PATH) -> nx.DiGraph:
 
 # ── Graph Analytics ───────────────────────────────────────────────────────────
 def _is_hostile(label: str) -> bool:
-    keywords = ["sanction", "attack", "invade", "bomb", "missile", "strike", "kill", "threaten", "blockade", "terrorize", "restrict", "ban", "expel", "dispute", "tension", "pressure", "cyber", "confront"]
+    keywords = [
+        "sanction",
+        "attack",
+        "invade",
+        "bomb",
+        "missile",
+        "strike",
+        "kill",
+        "threaten",
+        "blockade",
+        "terrorize",
+        "restrict",
+        "ban",
+        "expel",
+        "dispute",
+        "tension",
+        "pressure",
+        "cyber",
+        "confront",
+    ]
     label = label.lower()
     return any(k in label for k in keywords)
 
+
 def _is_cooperative(label: str) -> bool:
-    keywords = ["cooperate", "ally", "partner", "invest", "aid", "support", "trade", "treaty"]
+    keywords = [
+        "cooperate",
+        "ally",
+        "partner",
+        "invest",
+        "aid",
+        "support",
+        "trade",
+        "treaty",
+    ]
     label = label.lower()
     return any(k in label for k in keywords)
+
 
 def detect_conflicts(graph: nx.DiGraph) -> List[Dict[str, Any]]:
     conflicts = []
     checked = set()
     for u, v in graph.edges():
         pair = tuple(sorted([str(u), str(v)]))
-        if pair in checked: continue
+        if pair in checked:
+            continue
         checked.add(pair)
-        
+
         edges = []
         if graph.has_edge(u, v):
             edges.append((u, v, graph.edges[u, v]))
         if graph.has_edge(v, u):
             edges.append((v, u, graph.edges[v, u]))
-            
-        if len(edges) < 2: continue
-            
+
+        if len(edges) < 2:
+            continue
+
         has_hostile = False
         has_coop = False
         h_edge = None
         c_edge = None
-        
+
         for src, tgt, data in edges:
             lbl = data.get("label", "")
             if _is_hostile(lbl):
@@ -157,35 +202,41 @@ def detect_conflicts(graph: nx.DiGraph) -> List[Dict[str, Any]]:
             elif _is_cooperative(lbl):
                 has_coop = True
                 c_edge = {"source": src, "target": tgt, "label": lbl}
-                
+
         if has_hostile and has_coop:
-            conflicts.append({
-                "nodes": [u, v],
-                "hostile_edge": h_edge,
-                "cooperative_edge": c_edge
-            })
+            conflicts.append(
+                {"nodes": [u, v], "hostile_edge": h_edge, "cooperative_edge": c_edge}
+            )
     return conflicts
 
+
 def graph_health_score(graph: nx.DiGraph) -> Dict[str, Any]:
-    groups = [data.get("group","unknown") for _, data in graph.nodes(data=True)]
+    groups = [data.get("group", "unknown") for _, data in graph.nodes(data=True)]
     group_diversity = len(set(groups)) / 7.0 if graph.number_of_nodes() > 0 else 0
-    
-    labels = [d.get("label","") for _,_,d in graph.edges(data=True)]
-    label_diversity = min(1.0, len(set(labels)) / max(len(labels)*0.3, 1))
+
+    labels = [d.get("label", "") for _, _, d in graph.edges(data=True)]
+    label_diversity = min(1.0, len(set(labels)) / max(len(labels) * 0.3, 1))
 
     # proxy for edge richness
-    avg_edges = (graph.number_of_edges() / max(graph.number_of_nodes(), 1))
-    edge_density_score = min(1.0, avg_edges / 3.0) 
+    avg_edges = graph.number_of_edges() / max(graph.number_of_nodes(), 1)
+    edge_density_score = min(1.0, avg_edges / 3.0)
 
-    health = round((group_diversity * 33 + label_diversity * 33 + edge_density_score * 34))
-    
+    health = round(
+        (group_diversity * 33 + label_diversity * 33 + edge_density_score * 34)
+    )
+
     suggestions = []
-    if group_diversity < 0.6: suggestions.append("Add more entity types to understand the broader context.")
-    if edge_density_score < 0.5: suggestions.append("Extract more relationships to increase graph density.")
-    
+    if group_diversity < 0.6:
+        suggestions.append("Add more entity types to understand the broader context.")
+    if edge_density_score < 0.5:
+        suggestions.append("Extract more relationships to increase graph density.")
+
     return {"score": health, "suggestions": suggestions}
 
-def get_graph_analytics(graph: nx.DiGraph, custom_thresholds: Dict[str, float] = None) -> Dict[str, Any]:
+
+def get_graph_analytics(
+    graph: nx.DiGraph, custom_thresholds: Dict[str, float] = None
+) -> Dict[str, Any]:
     n, e = len(graph.nodes), len(graph.edges)
     if n == 0:
         return {
@@ -198,7 +249,10 @@ def get_graph_analytics(graph: nx.DiGraph, custom_thresholds: Dict[str, float] =
             "group_counts": {},
             "conflicts": [],
             "tensions": {},
-            "health": {"score": 0, "suggestions": ["Ingest some text to start building the graph!"]}
+            "health": {
+                "score": 0,
+                "suggestions": ["Ingest some text to start building the graph!"],
+            },
         }
 
     degree_cent = nx.degree_centrality(graph)
@@ -218,6 +272,7 @@ def get_graph_analytics(graph: nx.DiGraph, custom_thresholds: Dict[str, float] =
         group_counts[g] = group_counts.get(g, 0) + 1
 
     from geo import calculate_country_tensions
+
     return {
         "nodes": n,
         "edges": e,
@@ -228,7 +283,7 @@ def get_graph_analytics(graph: nx.DiGraph, custom_thresholds: Dict[str, float] =
         "group_counts": group_counts,
         "conflicts": detect_conflicts(graph),
         "tensions": calculate_country_tensions(graph, custom_thresholds),
-        "health": graph_health_score(graph)
+        "health": graph_health_score(graph),
     }
 
 
@@ -278,6 +333,7 @@ def retrieve_graph_context(
 
     if not relevant:
         import itertools
+
         edges = list(itertools.islice(graph.edges(data=True), max_edges))
         return "\n".join(
             f"- {u} → {d.get('label', 'connects to')} → {v}" for u, v, d in edges

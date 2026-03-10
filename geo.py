@@ -81,21 +81,55 @@ COUNTRY_COORDS = {
     "Yemen": {"lat": 15.553, "lon": 48.516},
 }
 
+
 def _edge_score(label: str) -> float:
     label = label.lower()
-    
-    high_keywords = ["sanction", "attack", "invade", "bomb", "missile", "strike", "kill", "threaten", "blockade", "terrorize"]
-    med_keywords = ["restrict", "ban", "expel", "dispute", "tension", "pressure", "cyber", "confront"]
-    coop_keywords = ["cooperate", "ally", "partner", "invest", "aid", "support", "trade", "treaty"]
-    
+
+    high_keywords = [
+        "sanction",
+        "attack",
+        "invade",
+        "bomb",
+        "missile",
+        "strike",
+        "kill",
+        "threaten",
+        "blockade",
+        "terrorize",
+    ]
+    med_keywords = [
+        "restrict",
+        "ban",
+        "expel",
+        "dispute",
+        "tension",
+        "pressure",
+        "cyber",
+        "confront",
+    ]
+    coop_keywords = [
+        "cooperate",
+        "ally",
+        "partner",
+        "invest",
+        "aid",
+        "support",
+        "trade",
+        "treaty",
+    ]
+
     for k in high_keywords:
-        if k in label: return 18.0
+        if k in label:
+            return 18.0
     for k in med_keywords:
-        if k in label: return 9.0
+        if k in label:
+            return 9.0
     for k in coop_keywords:
-        if k in label: return -3.0
-        
+        if k in label:
+            return -3.0
+
     return 2.0
+
 
 def _is_military_event(node_id: str, graph: nx.DiGraph) -> bool:
     data = graph.nodes[node_id]
@@ -105,103 +139,121 @@ def _is_military_event(node_id: str, graph: nx.DiGraph) -> bool:
             attr = eval(attr)
         except:
             attr = {}
-    
+
     # Simple heuristic
     lower_id = str(node_id).lower()
     mil_words = ["war", "battle", "strike", "military", "conflict", "invasion"]
     return any(w in lower_id for w in mil_words)
 
-def calculate_country_tensions(graph: nx.DiGraph, custom_thresholds: Dict[str, float] = None) -> Dict[str, float]:
+
+def calculate_country_tensions(
+    graph: nx.DiGraph, custom_thresholds: Dict[str, float] = None
+) -> Dict[str, float]:
     scores = {}
     country_nodes = []
-    
+
     for n, data in graph.nodes(data=True):
         if data.get("group", "").lower() == "country" or n in COUNTRY_COORDS:
             country_nodes.append(n)
-            
+
     for node in country_nodes:
         score: float = 0.0
-        
+
         # Outgoing hostile edges (aggressor weight)
         for _, _, data in graph.out_edges(node, data=True):
             score += float(_edge_score(data.get("label", ""))) * 1.2
-            
-        # Incoming hostile pressure (target weight)  
+
+        # Incoming hostile pressure (target weight)
         for _, _, data in graph.in_edges(node, data=True):
             score += _edge_score(data.get("label", "")) * 0.9
-            
+
         # Military event bonus
         for _, neighbor in list(graph.out_edges(node)) + list(graph.in_edges(node)):
             if graph.nodes[neighbor].get("group", "").lower() == "event":
                 if _is_military_event(neighbor, graph):
                     score += 7.0
-                    
+
         # Degree centrality multiplier
         node_degree = graph.degree(node)
-        score *= (1.0 + 0.04 * min(node_degree, 20))
-        
+        score *= 1.0 + 0.04 * min(node_degree, 20)
+
         scores[node] = score
-        
+
     return normalise_tensions(scores, custom_thresholds)
 
-def normalise_tensions(scores: Dict[str, float], custom_thresholds: Dict[str, float] = None) -> Dict[str, Dict[str, Any]]:
+
+def normalise_tensions(
+    scores: Dict[str, float], custom_thresholds: Dict[str, float] = None
+) -> Dict[str, Dict[str, Any]]:
     if not scores:
         return {}
-        
-    # Standardize to 0-100 logically. 
+
+    # Standardize to 0-100 logically.
     max_score = max(max(scores.values()), 1.0)
-    
+
     normed = {}
     for node, score in scores.items():
         val = (score / max_score) * 100
         clamped = max(0.0, min(100.0, val))
-        
+
         threshold = 75.0
         if custom_thresholds and node in custom_thresholds:
             threshold = custom_thresholds[node]
-            
+
         alert = clamped >= threshold
         normed[node] = {"score": clamped, "alert": alert, "threshold": threshold}
-        
+
     return normed
 
+
 def _get_color_for_tension(tension: float) -> str:
-    if tension >= 75: return "#ff2244"
-    if tension >= 50: return "#ff6b35"
-    if tension >= 25: return "#ffaa40"
-    if tension >= 10: return "#ffe066"
+    if tension >= 75:
+        return "#ff2244"
+    if tension >= 50:
+        return "#ff6b35"
+    if tension >= 25:
+        return "#ffaa40"
+    if tension >= 10:
+        return "#ffe066"
     return "#00ff88"
 
-def get_geo_data(graph: nx.DiGraph, custom_thresholds: Dict[str, float] = None) -> List[Dict[str, Any]]:
+
+def get_geo_data(
+    graph: nx.DiGraph, custom_thresholds: Dict[str, float] = None
+) -> List[Dict[str, Any]]:
     tensions = calculate_country_tensions(graph, custom_thresholds)
     markers = []
-    
+
     for node, tension in tensions.items():
         if node in COUNTRY_COORDS:
             coords = COUNTRY_COORDS[node]
             node_data = graph.nodes[node] if graph.has_node(node) else {}
-            
+
             # Find top connections
             connections = []
-            for u, v, d in list(graph.out_edges(node, data=True)) + list(graph.in_edges(node, data=True)):
+            for u, v, d in list(graph.out_edges(node, data=True)) + list(
+                graph.in_edges(node, data=True)
+            ):
                 if u == node:
                     connections.append(f"{d.get('label', 'connects to')} {v}")
                 else:
                     connections.append(f"{u} {d.get('label', 'connects to')}")
-                    
-            markers.append({
-                "id": node,
-                "lat": coords["lat"],
-                "lon": coords["lon"],
-                "group": node_data.get("group", "country"),
-                "tension": round(tension, 1),
-                "raw_score": 0, # not strictly needed, UI uses tension
-                "color": _get_color_for_tension(tension["score"]),
-                "threshold": tension["threshold"],
-                "alert": tension["alert"],
-                "connections": connections[:5],
-                "degree": graph.degree(node) if graph.has_node(node) else 0,
-                "attributes": str(node_data.get("attributes", {}))
-            })
-            
+
+            markers.append(
+                {
+                    "id": node,
+                    "lat": coords["lat"],
+                    "lon": coords["lon"],
+                    "group": node_data.get("group", "country"),
+                    "tension": round(tension["score"], 1),
+                    "raw_score": 0,  # not strictly needed, UI uses tension
+                    "color": _get_color_for_tension(tension["score"]),
+                    "threshold": tension["threshold"],
+                    "alert": tension["alert"],
+                    "connections": connections[:5],
+                    "degree": graph.degree(node) if graph.has_node(node) else 0,
+                    "attributes": str(node_data.get("attributes", {})),
+                }
+            )
+
     return markers
