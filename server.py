@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import json
+import os
 import asyncio
 from datetime import datetime, timezone
 import pathlib
@@ -49,6 +50,9 @@ from embedding_engine import GraphEmbeddingEngine
 from osint_engine import OsintEngine
 
 app = FastAPI(title="GOIES", version="3.0.0", docs_url="/api/docs")
+
+# Read Ollama host from env — supports Docker Compose and Railway
+OLLAMA_BASE_URL = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
@@ -353,7 +357,7 @@ def export_report(req: ReportRequest):
             )
             try:
                 resp = http.post(
-                    "http://localhost:11434/api/generate",
+                    f"{OLLAMA_BASE_URL}/api/generate",
                     json={"model": req.model, "prompt": prompt, "stream": False},
                     timeout=60,
                 )
@@ -570,7 +574,7 @@ def query(req: QueryRequest):
     )
     try:
         resp = http.post(
-            "http://localhost:11434/api/generate",
+            f"{OLLAMA_BASE_URL}/api/generate",
             json={"model": req.model, "prompt": prompt, "stream": False},
             timeout=60,
         )

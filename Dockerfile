@@ -1,26 +1,26 @@
-# Use official Python runtime as a parent image
+# ── GOIES Production Dockerfile ───────────────────────────────────────────────
 FROM python:3.11-slim
 
-# Set working directory
 WORKDIR /app
 
-# Install system dependencies (needed for compiling some python packages like networkx/pyvis if needed)
+# System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements file first to leverage Docker cache
+# Install Python deps first (cached layer)
 COPY requirements.txt .
-
-# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application code
+# Copy application
 COPY . .
 
-# Expose port for FastAPI
+# Create runtime data dirs (volumes can override)
+RUN mkdir -p goies_snapshots
+
+# Default port — Railway overrides this with $PORT
+ENV PORT=8000
 EXPOSE 8000
 
-# Command to run the application
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD uvicorn server:app --host 0.0.0.0 --port ${PORT}

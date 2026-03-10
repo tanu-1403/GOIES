@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import pathlib
 import re
 from dataclasses import dataclass, field
@@ -17,7 +18,7 @@ from typing import Any, Dict, List
 
 import networkx as nx
 
-OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_BASE_URL = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 REQUEST_TIMEOUT_SECS = 120
 SIM_HISTORY_FILE = pathlib.Path("sim_history.json")
 

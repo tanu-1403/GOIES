@@ -11,6 +11,7 @@ v2 improvements:
 """
 
 import json
+import os
 import re
 import requests
 from dataclasses import dataclass, field
@@ -18,7 +19,7 @@ from typing import Any, Dict, List
 
 from utils import chunk_text
 
-OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_BASE_URL = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 DEFAULT_MODEL = "llama3.2"
 REQUEST_TIMEOUT_SECS = 120
 
