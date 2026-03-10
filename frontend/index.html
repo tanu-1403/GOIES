@@ -254,94 +254,34 @@ body {
 
 /* ─── METRICS STRIP ─────────────────────────────────────────────────────────── */
 #metrics {
-  padding: 0;
+  padding: 0 48px 80px;
   display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
   background: var(--border);
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
-  position: relative;
-  overflow: hidden;
 }
-/* top scan-line sweep */
-#metrics::before {
-  content: '';
-  position: absolute; top: 0; left: -100%; right: auto;
-  width: 60%; height: 2px;
-  background: linear-gradient(90deg, transparent, var(--accent), transparent);
-  animation: sweep 6s linear infinite;
-  z-index: 5; pointer-events: none;
-}
-@keyframes sweep { 0%{left:-60%} 100%{left:160%} }
-
 .metric-block {
   background: var(--deep);
-  padding: 28px 36px;
-  display: flex; flex-direction: column; gap: 8px;
+  padding: 32px 40px;
+  display: flex; flex-direction: column; gap: 6px;
   position: relative; overflow: hidden;
-  transition: background 0.25s ease;
-  border-right: none;
+  transition: background 0.2s ease;
 }
-/* corner notch */
-.metric-block::after {
-  content: '';
-  position: absolute; bottom: 0; right: 0;
-  width: 20px; height: 20px;
-  background: var(--border);
-  clip-path: polygon(100% 0, 100% 100%, 0 100%);
-}
-.metric-block:hover { background: var(--panel); }
-
-/* coloured top accent bar per card */
-.metric-block:nth-child(1)::before { background: var(--accent); }
-.metric-block:nth-child(2)::before { background: var(--accent); }
-.metric-block:nth-child(3)::before { background: var(--red); }
-.metric-block:nth-child(4)::before { background: var(--green); }
-.metric-block:nth-child(4).status-offline::before { background: var(--red); }
-
 .metric-block::before {
   content: '';
   position: absolute; top: 0; left: 0; right: 0; height: 2px;
-  opacity: 1; transition: opacity 0.2s ease;
+  background: var(--accent); opacity: 0;
+  transition: opacity 0.2s ease;
 }
-
+.metric-block:hover { background: var(--panel); }
+.metric-block:hover::before { opacity: 1; }
 .metric-val {
-  font-family: var(--font-hud); font-size: 40px; font-weight: 900;
-  letter-spacing: 2px;
-  transition: color 0.5s ease;
-  line-height: 1;
+  font-family: var(--font-hud); font-size: 36px; font-weight: 900;
+  color: var(--accent); letter-spacing: 2px;
+  text-shadow: 0 0 30px var(--accent-glow);
 }
-.metric-block:nth-child(1) .metric-val,
-.metric-block:nth-child(2) .metric-val { color: var(--accent); text-shadow: 0 0 30px var(--accent-glow); }
-.metric-block:nth-child(3) .metric-val { color: var(--red);    text-shadow: 0 0 24px rgba(255,34,68,0.35); }
-.metric-block:nth-child(4) .metric-val { color: var(--green);  text-shadow: 0 0 24px rgba(0,255,136,0.3); }
-.metric-block:nth-child(4).status-offline .metric-val { color: var(--red); text-shadow: 0 0 24px rgba(255,34,68,0.45); animation: redpulse 2s infinite; }
-
-/* status dot inside metric value for card 4 */
-.metric-val .m-status-dot {
-  display: inline-block; width: 10px; height: 10px;
-  border-radius: 50%; vertical-align: middle;
-  margin-right: 8px; position: relative; top: -3px;
-}
-.metric-val .m-status-dot.online  { background: var(--green); box-shadow: 0 0 10px var(--green); animation: pulse 2s infinite; }
-.metric-val .m-status-dot.offline { background: var(--red);   box-shadow: 0 0 10px var(--red);   animation: blink 1s step-end infinite; }
-.metric-val .m-status-dot.checking{ background: var(--amber); animation: pulse 0.6s infinite; }
-
-.metric-label {
-  font-family: var(--font-mono); font-size: 10px; letter-spacing: 3px;
-  color: var(--text-lo); text-transform: uppercase;
-}
-.metric-sub { font-size: 13px; color: var(--text-mid); font-weight: 500; margin-top: 2px; }
-
-/* risk bar under card 3 */
-.metric-risk-bar {
-  height: 2px; background: rgba(255,255,255,0.06);
-  border-radius: 1px; margin-top: 4px; overflow: hidden;
-}
-.metric-risk-fill {
-  height: 100%; border-radius: 1px;
-  transition: width 1.2s ease, background 1.2s ease;
-  background: var(--red);
-}
+.metric-label { font-family: var(--font-mono); font-size: 10px; letter-spacing: 3px; color: var(--text-lo); }
+.metric-sub { font-size: 13px; color: var(--text-mid); margin-top: 4px; font-weight: 500; }
 
 /* ─── FEATURES SECTION ──────────────────────────────────────────────────────── */
 #features {
@@ -654,12 +594,9 @@ footer {
     <div class="metric-val" id="m-tension">—</div>
     <div class="metric-label">GLOBAL RISK</div>
     <div class="metric-sub">Tension index / 100</div>
-    <div class="metric-risk-bar"><div class="metric-risk-fill" id="m-risk-fill" style="width:0%"></div></div>
   </div>
-  <div class="metric-block" id="m-status-card">
-    <div class="metric-val" id="m-health">
-      <span class="m-status-dot checking" id="m-status-dot"></span><span id="m-health-text">…</span>
-    </div>
+  <div class="metric-block">
+    <div class="metric-val" id="m-health">—</div>
     <div class="metric-label">SYSTEM STATUS</div>
     <div class="metric-sub" id="m-status-sub">Connecting...</div>
   </div>
@@ -990,75 +927,35 @@ document.querySelectorAll('.feature-card').forEach(card => {
 
 /* ── Live API metrics ────────────────────────────────────────────────────────── */
 async function loadMetrics() {
-  const BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
-    ? `${window.location.protocol}//${window.location.hostname}:${window.location.port || 8000}`
-    : '';
-
-  const healthEl   = document.getElementById('m-health-text');
-  const statusDot  = document.getElementById('m-status-dot');
-  const statusSub  = document.getElementById('m-status-sub');
-  const statusCard = document.getElementById('m-status-card');
-
-  let health = null, graph = null;
-
   try {
-    [health, graph] = await Promise.all([
-      fetch(`${BASE}/api/health`, { signal: AbortSignal.timeout(4000) }).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(`${BASE}/api/graph`,  { signal: AbortSignal.timeout(4000) }).then(r => r.ok ? r.json() : null).catch(() => null),
+    const BASE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+      ? `${window.location.protocol}//${window.location.hostname}:${window.location.port || 8000}`
+      : '';
+
+    const [health, graph] = await Promise.all([
+      fetch(`${BASE}/api/health`).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(`${BASE}/api/graph`).then(r => r.ok ? r.json() : null).catch(() => null),
     ]);
-  } catch {}
 
-  // ── Status card ──
-  if (health && health.ollama === 'online') {
-    healthEl.textContent    = 'ONLINE';
-    statusDot.className     = 'm-status-dot online';
-    statusSub.textContent   = `Ollama connected · ${(health.models||[]).join(', ') || 'no models'}`;
-    statusCard.className    = 'metric-block';
-  } else if (health) {
-    // backend up, but ollama not running
-    healthEl.textContent    = 'OFFLINE';
-    statusDot.className     = 'm-status-dot offline';
-    statusSub.textContent   = 'Run: OLLAMA_ORIGINS=* ollama serve';
-    statusCard.classList.add('status-offline');
-  } else {
-    // backend itself not reachable — try Ollama directly (works if OLLAMA_ORIGINS=*)
-    let directOllamaUp = false;
-    try {
-      const r = await fetch('http://localhost:11434/api/tags', { signal: AbortSignal.timeout(2500) });
-      directOllamaUp = r.ok;
-    } catch {}
-
-    if (directOllamaUp) {
-      healthEl.textContent  = 'PARTIAL';
-      statusDot.className   = 'm-status-dot checking';
-      statusSub.textContent = 'Ollama up, backend not running';
-    } else {
-      healthEl.textContent  = 'OFFLINE';
-      statusDot.className   = 'm-status-dot offline';
-      statusSub.textContent = 'Start backend: uvicorn server:app';
-      statusCard.classList.add('status-offline');
+    if (health) {
+      document.getElementById('m-health').textContent = health.ollama === 'online' ? 'ONLINE' : 'OFFLINE';
+      document.getElementById('m-health').style.color = health.ollama === 'online' ? 'var(--green)' : 'var(--red)';
+      document.getElementById('m-status-sub').textContent = health.ollama === 'online' ? 'Ollama connected' : 'Ollama offline';
     }
-  }
 
-  // ── Graph metrics ──
-  if (graph?.analytics) {
-    const a = graph.analytics;
+    if (graph?.analytics) {
+      const a = graph.analytics;
+      document.getElementById('m-nodes').textContent = a.nodes ?? '—';
+      document.getElementById('m-edges').textContent = a.edges ?? '—';
 
-    document.getElementById('m-nodes').textContent = a.nodes ?? '—';
-    document.getElementById('m-edges').textContent = a.edges ?? '—';
-
-    const tensions = a.tensions || {};
-    const scores   = Object.values(tensions).map(t => typeof t === 'object' ? (t.score || 0) : (t || 0));
-    const maxT     = scores.length ? Math.max(...scores) : 0;
-    const tEl      = document.getElementById('m-tension');
-    tEl.textContent = maxT > 0 ? Math.round(maxT) : '0';
-
-    // risk bar
-    const fill = document.getElementById('m-risk-fill');
-    const pct  = Math.min(maxT, 100);
-    fill.style.width = pct + '%';
-    fill.style.background = maxT >= 75 ? 'var(--red)' : maxT >= 40 ? 'var(--amber)' : 'var(--green)';
-  }
+      const tensions = a.tensions || {};
+      const scores = Object.values(tensions).map(t => typeof t === 'object' ? (t.score || 0) : (t || 0));
+      const maxT = scores.length ? Math.max(...scores) : 0;
+      const tEl = document.getElementById('m-tension');
+      tEl.textContent = maxT > 0 ? Math.round(maxT) : '—';
+      tEl.style.color = maxT >= 75 ? 'var(--red)' : maxT >= 50 ? 'var(--amber)' : maxT >= 25 ? 'var(--amber)' : 'var(--green)';
+    }
+  } catch (e) { /* backend not running, that's okay on landing page */ }
 }
 
 loadMetrics();

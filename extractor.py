@@ -21,7 +21,7 @@ from utils import chunk_text
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 DEFAULT_MODEL = "llama3.2"
-REQUEST_TIMEOUT_SECS = 300
+REQUEST_TIMEOUT_SECS = 120
 
 VALID_ENTITY_CLASSES = {
     "country",
