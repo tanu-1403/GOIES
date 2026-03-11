@@ -26,6 +26,7 @@ New fixes (v4.1):
 from __future__ import annotations
 
 import ast
+import asyncio
 import html
 import io
 import json
@@ -985,6 +986,232 @@ async def _run_osint_ingest(model: str, articles_per_feed: int):
         save_graph(graph)
     except Exception as exc:
         logger.error("OSINT background ingest error: %s", exc, exc_info=True)
+
+
+# ── Continuous OSINT Loop ──────────────────────────────────────────────────────
+# State for the continuous auto-cycle
+_continuous_state: Dict[str, Any] = {
+    "active":       False,
+    "cycle":        0,
+    "started_at":   None,
+    "stopped_at":   None,
+    "interval_secs": 300,
+    "articles_per_feed": 5,
+    "model":        "llama3.2",
+    "query_log":    [],   # last 50 auto-generated queries + results
+    "cycle_log":    [],   # last 20 cycle summaries
+    "total_entities": 0,
+    "total_relations": 0,
+    "total_articles":  0,
+}
+_continuous_task: Optional[asyncio.Task] = None
+_continuous_lock = threading.Lock()
+
+
+class ContinuousRequest(BaseModel):
+    interval_secs:    int = 300
+    articles_per_feed: int = 5
+    model:            str  = "llama3.2"
+
+
+def _generate_auto_queries(g: nx.DiGraph, model: str, cycle: int) -> List[str]:
+    """
+    Derive 3-5 follow-up GQL queries automatically from the current graph state.
+    Uses top-degree nodes + detected tensions to form targeted queries.
+    """
+    queries: List[str] = []
+    if g.number_of_nodes() == 0:
+        return ["find countries", "find organizations", "find persons"]
+
+    # Always query top connectors
+    deg = sorted(((n, g.degree(n)) for n in g.nodes()), key=lambda x: x[1], reverse=True)
+    if deg:
+        top = deg[0][0]
+        queries.append(f"neighbors of {top}")
+        queries.append(f"path from {deg[0][0]} to {deg[-1][0]}" if len(deg) > 1 else f"find countries")
+
+    # Rotate entity-type queries by cycle number
+    entity_types = ["countries", "persons", "organizations", "events", "technologies"]
+    queries.append(f"find {entity_types[cycle % len(entity_types)]}")
+
+    # Hub analysis every 3 cycles
+    if cycle % 3 == 0:
+        queries.append("hub nodes")
+    else:
+        queries.append(f"top 5 nodes by degree")
+
+    # Tension-based query
+    try:
+        from geo import calculate_country_tensions
+        tensions = calculate_country_tensions(g, {})
+        if tensions:
+            hottest = max(tensions.items(), key=lambda x: x[1])[0]
+            queries.append(f"neighbors of {hottest}")
+    except Exception:
+        queries.append("isolated nodes")
+
+    return queries[:5]
+
+
+async def _continuous_loop():
+    """Background task: ingest → auto-query → sleep → repeat."""
+    import asyncio as _asyncio
+    state = _continuous_state
+    cycle = 0
+
+    logger.info("Continuous OSINT loop started. Interval: %ds", state["interval_secs"])
+
+    while state["active"]:
+        cycle += 1
+        state["cycle"] = cycle
+        cycle_start = datetime.now(timezone.utc)
+
+        logger.info("Continuous OSINT cycle %d starting…", cycle)
+
+        # ── Phase 1: RSS Ingest ────────────────────────────────────────────
+        ingest_summary = {"entities": 0, "relations": 0, "articles": 0, "error": None}
+        try:
+            result = await osint_engine.ingest_all(
+                graph=graph,
+                update_fn=_update_graph,
+                model=state["model"],
+                articles_per_feed=state["articles_per_feed"],
+            )
+            save_graph(graph)
+            ingest_summary["entities"]  = result.total_entities
+            ingest_summary["relations"] = result.total_relations
+            ingest_summary["articles"]  = result.articles_ingested
+            state["total_entities"]  += result.total_entities
+            state["total_relations"] += result.total_relations
+            state["total_articles"]  += result.articles_ingested
+        except Exception as exc:
+            ingest_summary["error"] = str(exc)
+            logger.error("Continuous loop cycle %d ingest error: %s", cycle, exc, exc_info=True)
+
+        # ── Phase 2: Auto-generated GQL Queries ───────────────────────────
+        auto_queries = _generate_auto_queries(graph, state["model"], cycle)
+        query_results: List[Dict] = []
+        for q in auto_queries:
+            try:
+                res = run_gql(q, graph)
+                count = res.get("count", len(res.get("result", [])))
+                query_results.append({"query": q, "type": res.get("type"), "count": count})
+                logger.debug("Auto-GQL [%s]: %s → %d results", cycle, q, count)
+            except Exception as exc:
+                query_results.append({"query": q, "error": str(exc)})
+
+        # ── Phase 3: Log cycle summary ────────────────────────────────────
+        elapsed = (datetime.now(timezone.utc) - cycle_start).total_seconds()
+        cycle_entry = {
+            "cycle":     cycle,
+            "timestamp": cycle_start.isoformat(),
+            "elapsed_secs": round(elapsed, 1),
+            "nodes":     graph.number_of_nodes(),
+            "edges":     graph.number_of_edges(),
+            "ingest":    ingest_summary,
+            "queries":   query_results,
+        }
+        state["cycle_log"].insert(0, cycle_entry)
+        state["cycle_log"] = state["cycle_log"][:20]
+
+        for qr in query_results:
+            state["query_log"].insert(0, {"cycle": cycle, **qr})
+        state["query_log"] = state["query_log"][:50]
+
+        logger.info(
+            "Continuous OSINT cycle %d done in %.1fs — +%d entities, +%d relations, %d nodes total",
+            cycle, elapsed,
+            ingest_summary["entities"], ingest_summary["relations"],
+            graph.number_of_nodes(),
+        )
+
+        if not state["active"]:
+            break
+
+        # ── Sleep until next cycle ─────────────────────────────────────────
+        logger.info("Continuous loop sleeping %ds until next cycle…", state["interval_secs"])
+        try:
+            await _asyncio.sleep(state["interval_secs"])
+        except _asyncio.CancelledError:
+            break
+
+    state["active"] = False
+    state["stopped_at"] = datetime.now(timezone.utc).isoformat()
+    logger.info("Continuous OSINT loop stopped after %d cycles.", cycle)
+
+
+@app.post("/api/osint/continuous/start")
+async def continuous_start(req: ContinuousRequest, request: Request):
+    _check_rate(request, max_req=5, window=60)
+    global _continuous_task
+
+    with _continuous_lock:
+        if _continuous_state["active"]:
+            raise HTTPException(409, "Continuous loop already running.")
+
+        if len(osint_engine.get_feeds()) == 0:
+            raise HTTPException(400, "No RSS feeds configured. Add at least one feed first.")
+
+        _continuous_state.update({
+            "active":            True,
+            "cycle":             0,
+            "started_at":        datetime.now(timezone.utc).isoformat(),
+            "stopped_at":        None,
+            "interval_secs":     max(60, req.interval_secs),
+            "articles_per_feed": max(1, min(req.articles_per_feed, 20)),
+            "model":             req.model,
+            "query_log":         [],
+            "cycle_log":         [],
+            "total_entities":    0,
+            "total_relations":   0,
+            "total_articles":    0,
+        })
+
+        _continuous_task = asyncio.create_task(_continuous_loop())
+
+    logger.info(
+        "Continuous OSINT loop activated — interval=%ds, articles/feed=%d",
+        req.interval_secs, req.articles_per_feed
+    )
+    return {
+        "status":       "started",
+        "interval_secs": _continuous_state["interval_secs"],
+        "feeds":        len(osint_engine.get_feeds()),
+    }
+
+
+@app.post("/api/osint/continuous/stop")
+async def continuous_stop():
+    global _continuous_task
+    with _continuous_lock:
+        if not _continuous_state["active"]:
+            raise HTTPException(409, "Continuous loop is not running.")
+        _continuous_state["active"] = False
+        if _continuous_task and not _continuous_task.done():
+            _continuous_task.cancel()
+    logger.info("Continuous OSINT loop stop requested.")
+    return {"status": "stopping", "cycles_completed": _continuous_state["cycle"]}
+
+
+@app.get("/api/osint/continuous/status")
+def continuous_status():
+    s = _continuous_state
+    return {
+        "active":          s["active"],
+        "cycle":           s["cycle"],
+        "started_at":      s["started_at"],
+        "stopped_at":      s["stopped_at"],
+        "interval_secs":   s["interval_secs"],
+        "articles_per_feed": s["articles_per_feed"],
+        "model":           s["model"],
+        "total_entities":  s["total_entities"],
+        "total_relations": s["total_relations"],
+        "total_articles":  s["total_articles"],
+        "graph_nodes":     graph.number_of_nodes(),
+        "graph_edges":     graph.number_of_edges(),
+        "cycle_log":       s["cycle_log"][:10],
+        "query_log":       s["query_log"][:20],
+    }
 
 
 @app.post("/api/osint/enrich/{node_id:path}")
