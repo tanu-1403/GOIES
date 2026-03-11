@@ -972,18 +972,68 @@ select { cursor: pointer; }
 }
 .cluster-node:hover { transform: scale(1.06); }
 
-/* ── OSINT PANEL ─────────────────────────────────────── */
+/* ── OSINT PANEL ─────────────────────────────────────────────── */
 #osint-left {
   width: 300px; border-right: 1px solid var(--border);
   padding: 16px; background: var(--bg-deep); overflow-y: auto;
 }
 #osint-right { flex: 1; overflow-y: auto; padding: 16px; }
+
+/* ── Continuous Loop Activate Button ── */
+#btn-continuous-toggle {
+  width: 100%; margin-bottom: 12px; font-size: 13px;
+  font-family: var(--font-display); letter-spacing: 0.08em;
+  padding: 12px; border-radius: var(--radius);
+  border: 1px solid var(--border); background: var(--bg-raised);
+  color: var(--text); cursor: pointer; position: relative; overflow: hidden;
+  transition: all var(--t-mid) var(--ease);
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+}
+#btn-continuous-toggle.inactive { border-color: var(--accent); color: var(--accent); }
+#btn-continuous-toggle.inactive:hover {
+  background: rgba(0,229,255,0.08); box-shadow: 0 0 16px rgba(0,229,255,0.2);
+}
+#btn-continuous-toggle.active {
+  border-color: var(--red); color: var(--red);
+  background: rgba(248,81,73,0.06);
+  animation: pulse-border 2s ease-in-out infinite;
+}
+#btn-continuous-toggle.active:hover {
+  background: rgba(248,81,73,0.14); box-shadow: 0 0 16px rgba(248,81,73,0.25);
+}
+@keyframes pulse-border {
+  0%,100% { box-shadow: 0 0 6px rgba(248,81,73,0.2); }
+  50%      { box-shadow: 0 0 18px rgba(248,81,73,0.45); }
+}
+#continuous-live-bar {
+  display: none; align-items: center; gap: 8px;
+  padding: 8px 12px; margin-bottom: 12px;
+  background: rgba(0,229,255,0.05); border: 1px solid rgba(0,229,255,0.2);
+  border-radius: var(--radius); font-size: 11px; font-family: var(--font-mono);
+  color: var(--text-mid);
+}
+#continuous-live-bar.visible { display: flex; }
+.live-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+  animation: blink 1s step-start infinite; flex-shrink: 0;
+}
+@keyframes blink { 50% { opacity: 0; } }
+#continuous-cycle-count { color: var(--accent); font-weight: 700; }
+#cycle-progress-wrap { display: none; margin-bottom: 12px; }
+#cycle-progress-wrap.visible { display: block; }
+.progress-label {
+  display: flex; justify-content: space-between;
+  font-size: 10px; font-family: var(--font-mono); color: var(--text-lo);
+  margin-bottom: 4px;
+}
+.progress-bar-bg { height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; }
+.progress-bar-fill { height: 100%; background: var(--accent); transition: width 1s linear; }
+
 .feed-item {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 10px; border: 1px solid var(--border);
   border-radius: var(--radius); margin-bottom: 6px;
-  transition: border-color var(--t-mid) var(--ease),
-              background var(--t-mid) var(--ease);
+  transition: border-color var(--t-mid) var(--ease), background var(--t-mid) var(--ease);
 }
 .feed-item:hover { border-color: var(--border-hi); background: var(--bg-raised); }
 .feed-name { font-size: 12px; color: var(--text-mid); }
@@ -992,22 +1042,40 @@ select { cursor: pointer; }
   font-family: var(--font-mono); font-size: 9px; color: var(--red);
   cursor: pointer; padding: 2px 7px;
   border: 1px solid var(--red-dim); border-radius: var(--radius);
-  transition: background var(--t-mid) var(--ease),
-              border-color var(--t-mid) var(--ease),
-              box-shadow var(--t-mid) var(--ease);
+  transition: background var(--t-mid) var(--ease), border-color var(--t-mid) var(--ease);
 }
-.feed-remove:hover {
-  background: var(--red-glow);
-  border-color: var(--red);
-  box-shadow: 0 0 8px var(--red-glow);
-}
+.feed-remove:hover { background: var(--red-glow); border-color: var(--red); box-shadow: 0 0 8px var(--red-glow); }
 
 .article-log-item {
   padding: 8px 12px; border-bottom: 1px solid var(--border);
-  font-size: 11px;
-  transition: background var(--t-fast) var(--ease);
+  font-size: 11px; transition: background var(--t-fast) var(--ease);
 }
 .article-log-item:hover { background: var(--bg-raised); }
+/* ── Cycle Log cards ── */
+.cycle-card {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 10px 12px; margin-bottom: 8px; font-size: 11px;
+  background: var(--bg-raised); transition: border-color var(--t-mid) var(--ease);
+}
+.cycle-card:hover { border-color: var(--border-hi); }
+.cycle-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.cycle-num { font-family: var(--font-display); font-size: 13px; color: var(--accent); font-weight: 700; }
+.cycle-ts { font-family: var(--font-mono); font-size: 9px; color: var(--text-lo); }
+.cycle-stats { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.cycle-stat { font-family: var(--font-mono); font-size: 10px; }
+.cycle-queries { margin-top: 6px; }
+.cq-row {
+  display: flex; justify-content: space-between;
+  font-family: var(--font-mono); font-size: 9px;
+  padding: 2px 0; border-bottom: 1px solid var(--border); color: var(--text-lo);
+}
+.cq-row:last-child { border-bottom: none; }
+.cq-query { color: var(--purple); }
+.cq-count { color: var(--green); }
+#continuous-total-stats {
+  display: none; grid-template-columns: repeat(4,1fr); gap: 10px; margin-bottom: 14px;
+}
+#continuous-total-stats.visible { display: grid; }
 .art-title { color: var(--text-mid); margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .art-meta { display: flex; gap: 8px; }
 .art-status-ok   { color: var(--green); font-family: var(--font-mono); font-size: 9px; }
@@ -1457,20 +1525,70 @@ select { cursor: pointer; }
 <!-- ════ OSINT ════ -->
 <div class="panel" id="panel-osint">
   <div id="osint-left">
-    <div class="section-title">OSINT INGESTION</div>
+
+    <!-- ── CONTINUOUS LOOP ACTIVATE ── -->
+    <div class="section-title">CONTINUOUS INTELLIGENCE LOOP</div>
+
+    <button id="btn-continuous-toggle" class="inactive">
+      <span id="continuous-btn-icon">▶</span>
+      <span id="continuous-btn-label">ACTIVATE LOOP</span>
+    </button>
+
+    <div id="continuous-live-bar">
+      <div class="live-dot"></div>
+      <span>CYCLE&nbsp;<span id="continuous-cycle-count">0</span></span>
+      <span id="continuous-next-in" style="margin-left:auto;color:var(--text-lo)"></span>
+    </div>
+
+    <div id="cycle-progress-wrap">
+      <div class="progress-label">
+        <span>NEXT CYCLE</span>
+        <span id="progress-time-label">—</span>
+      </div>
+      <div class="progress-bar-bg">
+        <div class="progress-bar-fill" id="cycle-progress-fill" style="width:0%"></div>
+      </div>
+    </div>
+
+    <div class="row-2" style="margin-bottom:12px">
+      <div class="input-group" style="margin-bottom:0">
+        <label class="input-label">INTERVAL (SEC)</label>
+        <select id="cont-interval">
+          <option value="60">1 min</option>
+          <option value="300" selected>5 min</option>
+          <option value="600">10 min</option>
+          <option value="1800">30 min</option>
+          <option value="3600">1 hour</option>
+        </select>
+      </div>
+      <div class="input-group" style="margin-bottom:0">
+        <label class="input-label">ARTICLES/FEED</label>
+        <select id="cont-art-limit">
+          <option value="3">3</option>
+          <option value="5" selected>5</option>
+          <option value="10">10</option>
+        </select>
+      </div>
+    </div>
+
+    <hr class="divider"/>
+
+    <!-- ── ONE-SHOT INGEST ── -->
+    <div class="section-title">MANUAL INGEST</div>
     <div id="osint-ingest-status" style="display:none" class="ingest-running">
       <span style="animation:spin .8s linear infinite;display:inline-block">↻</span> INGESTION RUNNING…
     </div>
-    <button class="btn btn-primary" id="btn-osint-ingest" style="width:100%;margin-bottom:12px">
-      <span class="btn-text">▶ INGEST RSS FEEDS</span><span class="btn-loader">↻</span>
+    <button class="btn btn-ghost btn-sm" id="btn-osint-ingest" style="width:100%;margin-bottom:8px">
+      <span class="btn-text">▶ INGEST ONCE</span><span class="btn-loader">↻</span>
     </button>
-    <div class="row-2" style="margin-bottom:12px">
-      <div class="input-group" style="margin-bottom:0">
-        <label class="input-label">ARTICLES/FEED</label>
-        <select id="osint-art-limit"><option value="3">3</option><option value="5" selected>5</option><option value="10">10</option></select>
-      </div>
+    <div class="input-group" style="margin-bottom:10px">
+      <label class="input-label">ARTICLES/FEED</label>
+      <select id="osint-art-limit"><option value="3">3</option><option value="5" selected>5</option><option value="10">10</option></select>
     </div>
+
     <hr class="divider"/>
+
+    <!-- ── RSS FEEDS ── -->
     <div class="section-title">RSS FEEDS</div>
     <div id="feed-list"></div>
     <hr class="divider"/>
@@ -1484,27 +1602,55 @@ select { cursor: pointer; }
       <input type="url" id="feed-url-input" placeholder="https://…/rss.xml"/>
     </div>
     <button class="btn btn-ghost btn-sm" id="btn-add-feed" style="width:100%">+ ADD FEED</button>
+
     <hr class="divider"/>
     <div class="section-title">GDELT QUERY</div>
     <div class="input-group">
       <input type="text" id="gdelt-entity-input" placeholder="Entity name…"/>
     </div>
     <button class="btn btn-ghost btn-sm" id="btn-gdelt-query" style="width:100%">QUERY GDELT</button>
-  </div>
+
+  </div><!-- /osint-left -->
+
   <div id="osint-right">
-    <div style="display:flex;gap:10px;margin-bottom:14px">
-      <button class="btn btn-ghost btn-sm" id="btn-osint-refresh" style="margin-left:auto">↺ REFRESH STATUS</button>
+
+    <!-- ── Header row ── -->
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px">
+      <div class="section-title" style="margin:0">LIVE STATUS</div>
+      <button class="btn btn-ghost btn-sm" id="btn-osint-refresh" style="margin-left:auto">↺ REFRESH</button>
     </div>
+
+    <!-- ── Session totals (shown when continuous loop is active) ── -->
+    <div id="continuous-total-stats"></div>
+
+    <!-- ── One-shot stats ── -->
     <div id="osint-stats" style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px"></div>
-    <div class="section-title">ARTICLE LOG</div>
-    <div id="osint-article-log"></div>
+
+    <!-- ── Tabs: Cycle Log | Article Log ── -->
+    <div style="display:flex;gap:0;margin-bottom:10px;border-bottom:1px solid var(--border)">
+      <button class="nav-tab active" id="osint-tab-cycles" style="font-size:11px;padding:6px 14px" onclick="switchOsintTab('cycles')">CYCLE LOG</button>
+      <button class="nav-tab" id="osint-tab-articles" style="font-size:11px;padding:6px 14px" onclick="switchOsintTab('articles')">ARTICLE LOG</button>
+    </div>
+
+    <div id="osint-view-cycles">
+      <div id="osint-cycle-log">
+        <div class="empty-state"><div class="empty-icon">⊙</div>Start the loop to see cycle history</div>
+      </div>
+    </div>
+
+    <div id="osint-view-articles" style="display:none">
+      <div id="osint-article-log">
+        <div class="empty-state"><div class="empty-icon">⊙</div>No articles ingested yet</div>
+      </div>
+    </div>
+
     <div id="gdelt-results" style="display:none">
       <div class="section-title" style="margin-top:14px">GDELT RESULTS</div>
       <div id="gdelt-result-list"></div>
     </div>
-  </div>
-</div>
 
+  </div><!-- /osint-right -->
+</div>
 </main>
 </div>
 
@@ -1536,20 +1682,26 @@ const S = {
 };
 
 /* ── API LAYER ──────────────────────────────────────────────────────────────── */
+// FIX: Centralized HTTP error handler — surfaces rate-limit and upload-size errors clearly
+function _apiError(r, e) {
+  if (r.status === 429) return new Error('Rate limit reached — please wait a moment before retrying.');
+  if (r.status === 413) return new Error('File too large — maximum upload size is 10 MB.');
+  return new Error(e.detail || r.statusText || `HTTP ${r.status}`);
+}
 const API = {
   get: async (path) => {
     const r = await fetch(path);
-    if (!r.ok) { const e = await r.json().catch(() => ({detail: r.statusText})); throw new Error(e.detail || r.statusText); }
+    if (!r.ok) { const e = await r.json().catch(() => ({detail: r.statusText})); throw _apiError(r, e); }
     return r.json();
   },
   post: async (path, body) => {
     const r = await fetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    if (!r.ok) { const e = await r.json().catch(() => ({detail: r.statusText})); throw new Error(e.detail || r.statusText); }
+    if (!r.ok) { const e = await r.json().catch(() => ({detail: r.statusText})); throw _apiError(r, e); }
     return r.json();
   },
   del: async (path) => {
     const r = await fetch(path, { method:'DELETE' });
-    if (!r.ok) { const e = await r.json().catch(() => ({detail: r.statusText})); throw new Error(e.detail || r.statusText); }
+    if (!r.ok) { const e = await r.json().catch(() => ({detail: r.statusText})); throw _apiError(r, e); }
     return r.json();
   },
 };
@@ -1669,7 +1821,7 @@ document.querySelectorAll('.nav-tab').forEach(btn => {
     if (tab === 'report')    { renderEntityChecklist(); }
     if (tab === 'gql')       { initGQL(); }
     if (tab === 'embed')     { refreshEmbedStatus(); }
-    if (tab === 'osint')     { refreshOsintStatus(); }
+    if (tab === 'osint')     { refreshOsintStatus(); refreshContinuousStatus(); }
   });
 });
 
@@ -1680,6 +1832,7 @@ document.getElementById('model-select').addEventListener('change', e => { S.mode
 // FIX-3: Store file text here so the extract handler always reads the right source
 let _fileText = '';
 const fileInput = document.getElementById('file-input');
+const dropZone = document.getElementById('drop-zone');
 dropZone.addEventListener('click', () => fileInput.click());
 dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
 dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
@@ -1770,6 +1923,7 @@ document.getElementById('btn-extract').addEventListener('click', async () => {
         try {
           const payload = JSON.parse(line.slice(6));
           if (payload.error) { logLine(`✗ ${payload.error}`, 'err'); break; }
+          if (payload.parse_error) logLine(`⚠ Chunk ${payload.chunk} parse error (skipped): ${payload.parse_error}`, 'warn');
           if (payload.done) {
             logLine(`✓ Extraction complete: ${payload.totals.entities}E ${payload.totals.relations}R ${payload.totals.new_nodes.length} new nodes`, 'ok');
             break;
@@ -2224,12 +2378,16 @@ function renderGQLResult(data) {
   const body = document.getElementById('gql-result-body');
   const count = data.count ?? (data.result?.length ?? '');
   document.getElementById('gql-result-count').textContent = count !== '' ? `${count} result${count!==1?'s':''}` : '';
-  if (data.type === 'error') { body.innerHTML = `<div class="card" style="border-color:var(--red)"><span style="color:var(--red)">✗ ${data.error}</span></div>`; return; }
-  if (data.type === 'count') { body.innerHTML = `<div class="card"><div style="font-family:var(--font-display);font-size:42px;font-weight:900;color:var(--accent);text-align:center">${data.count}</div><div style="text-align:center;font-family:var(--font-mono);font-size:11px;color:var(--text-lo);margin-top:4px">${(data.group||'').toUpperCase()} ENTITIES</div></div>`; return; }
-  if (data.type === 'path') { body.innerHTML = renderGQLPath(data) + renderGQLTable(data.edges || [], ['from','label','to']); return; }
-  if (data.type === 'nodes') { const r = data.result || []; if (!r.length) { body.innerHTML = '<div class="empty-state"><div class="empty-icon">◎</div>No matching nodes</div>'; return; } body.innerHTML = renderGQLTable(r, Object.keys(r[0])); return; }
-  if (data.type === 'edges') { const r = data.result || []; if (!r.length) { body.innerHTML = '<div class="empty-state"><div class="empty-icon">◎</div>No matching edges</div>'; return; } body.innerHTML = renderGQLTable(r, ['from','label','to','confidence']); return; }
-  body.innerHTML = `<pre style="font-family:var(--font-mono);font-size:11px;color:var(--text-mid)">${JSON.stringify(data,null,2)}</pre>`;
+  // FIX: Truncation warning when result set was capped at GQL_DEFAULT_LIMIT
+  const truncWarning = data.truncated
+    ? `<div style="font-family:var(--font-mono);font-size:10px;color:var(--amber);padding:6px 10px;background:var(--amber-dim);border-radius:var(--radius);margin-bottom:8px">⚠ Results capped at ${data.truncated_at||200} rows. Use <code>top N nodes by degree</code> or a more specific query.</div>`
+    : '';
+  if (data.type === 'error') { body.innerHTML = truncWarning + `<div class="card" style="border-color:var(--red)"><span style="color:var(--red)">✗ ${data.error}</span></div>`; return; }
+  if (data.type === 'count') { body.innerHTML = truncWarning + `<div class="card"><div style="font-family:var(--font-display);font-size:42px;font-weight:900;color:var(--accent);text-align:center">${data.count}</div><div style="text-align:center;font-family:var(--font-mono);font-size:11px;color:var(--text-lo);margin-top:4px">${(data.group||'').toUpperCase()} ENTITIES</div></div>`; return; }
+  if (data.type === 'path') { body.innerHTML = truncWarning + renderGQLPath(data) + renderGQLTable(data.edges || [], ['from','label','to']); return; }
+  if (data.type === 'nodes') { const r = data.result || []; if (!r.length) { body.innerHTML = truncWarning + '<div class="empty-state"><div class="empty-icon">◎</div>No matching nodes</div>'; return; } body.innerHTML = truncWarning + renderGQLTable(r, Object.keys(r[0])); return; }
+  if (data.type === 'edges') { const r = data.result || []; if (!r.length) { body.innerHTML = truncWarning + '<div class="empty-state"><div class="empty-icon">◎</div>No matching edges</div>'; return; } body.innerHTML = truncWarning + renderGQLTable(r, ['from','label','to','confidence']); return; }
+  body.innerHTML = truncWarning + `<pre style="font-family:var(--font-mono);font-size:11px;color:var(--text-mid)">${JSON.stringify(data,null,2)}</pre>`;
 }
 
 function renderGQLPath(data) {
@@ -2307,7 +2465,185 @@ document.getElementById('btn-embed-cluster').addEventListener('click', async () 
   } catch(e) { toast(e.message,'error'); }
 });
 
-/* ── OSINT ENGINE ────────────────────────────────────────────────────────────── */
+/* ── OSINT ENGINE ────────────────────────────────────────────────────────────────────────────── */
+
+/* Continuous loop client state */
+const CL = {
+  active: false,
+  cycle: 0,
+  intervalSecs: 300,
+  cycleStartedAt: null,  // epoch ms when current cycle sleep started
+  pollTimer: null,
+  progressTimer: null,
+};
+
+/* ── Toggle Button ── */
+document.getElementById('btn-continuous-toggle').addEventListener('click', async () => {
+  if (!CL.active) {
+    await startContinuousLoop();
+  } else {
+    await stopContinuousLoop();
+  }
+});
+
+async function startContinuousLoop() {
+  const interval = parseInt(document.getElementById('cont-interval').value) || 300;
+  const limit    = parseInt(document.getElementById('cont-art-limit').value) || 5;
+  try {
+    await API.post('/api/osint/continuous/start', {
+      interval_secs: interval, articles_per_feed: limit, model: S.model
+    });
+    CL.active = true;
+    CL.intervalSecs = interval;
+    CL.cycleStartedAt = Date.now();
+    setContinuousUI(true);
+    toast('Continuous intelligence loop activated', 'success');
+    pollContinuousStatus();
+    startProgressBar();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function stopContinuousLoop() {
+  try {
+    await API.post('/api/osint/continuous/stop', {});
+    CL.active = false;
+    if (CL.pollTimer)     { clearTimeout(CL.pollTimer);     CL.pollTimer = null; }
+    if (CL.progressTimer) { clearInterval(CL.progressTimer); CL.progressTimer = null; }
+    setContinuousUI(false);
+    toast('Loop stopped — final cycle completed', 'info');
+    await refreshContinuousStatus();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+function setContinuousUI(active) {
+  const btn = document.getElementById('btn-continuous-toggle');
+  const liveBar = document.getElementById('continuous-live-bar');
+  const progressWrap = document.getElementById('cycle-progress-wrap');
+  if (active) {
+    btn.className = 'active';
+    document.getElementById('continuous-btn-icon').textContent = '■';
+    document.getElementById('continuous-btn-label').textContent = 'STOP LOOP';
+    liveBar.classList.add('visible');
+    progressWrap.classList.add('visible');
+    document.getElementById('continuous-total-stats').classList.add('visible');
+  } else {
+    btn.className = 'inactive';
+    document.getElementById('continuous-btn-icon').textContent = '▶';
+    document.getElementById('continuous-btn-label').textContent = 'ACTIVATE LOOP';
+    liveBar.classList.remove('visible');
+    progressWrap.classList.remove('visible');
+    document.getElementById('cycle-progress-fill').style.width = '0%';
+  }
+}
+
+/* ── Progress bar (counts down to next cycle) ── */
+function startProgressBar() {
+  if (CL.progressTimer) clearInterval(CL.progressTimer);
+  CL.cycleStartedAt = Date.now();
+  CL.progressTimer = setInterval(() => {
+    if (!CL.active) { clearInterval(CL.progressTimer); return; }
+    const elapsed = (Date.now() - CL.cycleStartedAt) / 1000;
+    const pct = Math.min(100, (elapsed / CL.intervalSecs) * 100);
+    const remaining = Math.max(0, CL.intervalSecs - elapsed);
+    document.getElementById('cycle-progress-fill').style.width = pct + '%';
+    const mins = Math.floor(remaining / 60);
+    const secs = Math.floor(remaining % 60);
+    document.getElementById('progress-time-label').textContent =
+      mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+    document.getElementById('continuous-next-in').textContent =
+      `next in ${mins > 0 ? `${mins}m ${secs}s` : `${secs}s`}`;
+  }, 1000);
+}
+
+/* ── Polling: fetch continuous status from backend ── */
+async function pollContinuousStatus() {
+  if (!CL.active) return;
+  await refreshContinuousStatus();
+  CL.pollTimer = setTimeout(pollContinuousStatus, 5000);
+}
+
+async function refreshContinuousStatus() {
+  try {
+    const data = await API.get('/api/osint/continuous/status');
+
+    // Sync active state in case server stopped the loop
+    if (CL.active && !data.active) {
+      CL.active = false;
+      setContinuousUI(false);
+      if (CL.progressTimer) { clearInterval(CL.progressTimer); CL.progressTimer = null; }
+    }
+
+    // Update cycle counter
+    if (data.cycle !== CL.cycle) {
+      CL.cycle = data.cycle;
+      CL.cycleStartedAt = Date.now(); // reset progress bar on new cycle
+      if (CL.active) startProgressBar();
+    }
+    document.getElementById('continuous-cycle-count').textContent = data.cycle;
+
+    // Cumulative session stats
+    document.getElementById('continuous-total-stats').innerHTML = [
+      {val: data.cycle,            lbl: 'CYCLES'},
+      {val: data.total_articles,   lbl: 'ARTICLES'},
+      {val: data.total_entities,   lbl: 'ENTITIES'},
+      {val: `${data.graph_nodes}N ${data.graph_edges}E`, lbl: 'GRAPH'},
+    ].map(s => `<div class="stat-card" style="padding:10px"><div class="stat-val" style="font-size:18px">${s.val}</div><div class="stat-name">${s.lbl}</div></div>`).join('');
+
+    // Render cycle log
+    renderCycleLog(data.cycle_log || []);
+
+    // If graph grew, trigger live update
+    if (data.graph_nodes !== S.graph?.nodes?.length) {
+      try {
+        const gd = await loadGraphData();
+        if (gd) { S.graph = gd.vis; S.analytics = gd.analytics; updateHeader(gd.analytics); }
+        if (S.network) S.network.setData({ nodes: new vis.DataSet(gd.vis.nodes), edges: new vis.DataSet(gd.vis.edges) });
+      } catch {}
+    }
+  } catch {}
+}
+
+function renderCycleLog(cycles) {
+  const container = document.getElementById('osint-cycle-log');
+  if (!cycles.length) {
+    container.innerHTML = '<div class="empty-state"><div class="empty-icon">⊙</div>Waiting for first cycle…</div>';
+    return;
+  }
+  container.innerHTML = cycles.map(c => {
+    const ing = c.ingest || {};
+    const ts  = new Date(c.timestamp).toLocaleTimeString();
+    const hasError = ing.error;
+    const queries  = (c.queries || []).slice(0, 5);
+    return `<div class="cycle-card">
+      <div class="cycle-card-header">
+        <span class="cycle-num">CYCLE ${c.cycle}</span>
+        <span class="cycle-ts">${ts} · ${c.elapsed_secs}s</span>
+      </div>
+      <div class="cycle-stats">
+        <span class="cycle-stat" style="color:var(--green)">+${ing.entities||0} ENT</span>
+        <span class="cycle-stat" style="color:var(--purple)">+${ing.relations||0} REL</span>
+        <span class="cycle-stat" style="color:var(--amber)">${ing.articles||0} ART</span>
+        <span class="cycle-stat" style="color:var(--text-lo)">${c.nodes}N / ${c.edges}E</span>
+        ${hasError ? `<span class="cycle-stat" style="color:var(--red)">⚠ ${ing.error}</span>` : ''}
+      </div>
+      ${queries.length ? `<div class="cycle-queries">
+        ${queries.map(q => `<div class="cq-row">
+          <span class="cq-query">▸ ${q.query || ''}</span>
+          <span class="cq-count">${q.error ? '⚠ err' : (q.count !== undefined ? q.count + ' rows' : '')}</span>
+        </div>`).join('')}
+      </div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function switchOsintTab(tab) {
+  document.getElementById('osint-view-cycles').style.display  = tab === 'cycles'   ? '' : 'none';
+  document.getElementById('osint-view-articles').style.display = tab === 'articles' ? '' : 'none';
+  document.getElementById('osint-tab-cycles').classList.toggle('active',   tab === 'cycles');
+  document.getElementById('osint-tab-articles').classList.toggle('active', tab === 'articles');
+}
+
+/* ── One-shot manual ingest button ── */
 document.getElementById('btn-osint-ingest').addEventListener('click', async () => {
   const limit = parseInt(document.getElementById('osint-art-limit').value) || 5;
   setLoading('btn-osint-ingest', true);
@@ -2315,27 +2651,34 @@ document.getElementById('btn-osint-ingest').addEventListener('click', async () =
   try {
     await API.post('/api/osint/ingest', { model: S.model, articles_per_feed: limit });
     toast('OSINT ingestion started in background', 'info');
-    let polls = 0; const iv = setInterval(async () => { await refreshOsintStatus(); polls++; if (polls > 10) { clearInterval(iv); document.getElementById('osint-ingest-status').style.display = 'none'; } }, 3000);
-  } catch(e) { toast(e.message,'error'); document.getElementById('osint-ingest-status').style.display = 'none'; }
+    let polls = 0;
+    const iv = setInterval(async () => {
+      await refreshOsintStatus(); polls++;
+      if (polls > 20) { clearInterval(iv); document.getElementById('osint-ingest-status').style.display = 'none'; }
+    }, 3000);
+  } catch(e) { toast(e.message, 'error'); document.getElementById('osint-ingest-status').style.display = 'none'; }
   finally { setLoading('btn-osint-ingest', false); }
 });
 
-document.getElementById('btn-osint-refresh').addEventListener('click', refreshOsintStatus);
+document.getElementById('btn-osint-refresh').addEventListener('click', async () => {
+  await refreshOsintStatus();
+  await refreshContinuousStatus();
+});
 
 async function refreshOsintStatus() {
   try {
     const data = await API.get('/api/osint/status');
-    if (!data._running) document.getElementById('osint-ingest-status').style.display = 'none';
+    if (!data.running) document.getElementById('osint-ingest-status').style.display = 'none';
     document.getElementById('osint-stats').innerHTML = [
       {val: data.feeds, lbl:'FEEDS'},
       {val: data.processed_urls, lbl:'PROCESSED'},
       {val: data.last_run ? new Date(data.last_run).toLocaleTimeString() : '—', lbl:'LAST RUN'},
       {val: data.running ? '●' : '○', lbl:'STATUS', color: data.running ? 'var(--amber)' : 'var(--text-lo)'},
-    ].map(s => `<div class="stat-card" style="padding:10px"><div class="stat-val" style="font-size:18px;${s.color?`color:${s.color}`:''}}">${s.val}</div><div class="stat-name">${s.lbl}</div></div>`).join('');
+    ].map(s => `<div class="stat-card" style="padding:10px"><div class="stat-val" style="font-size:18px;${s.color?`color:${s.color}`:''}">${s.val}</div><div class="stat-name">${s.lbl}</div></div>`).join('');
     const log = data.recent_log || [];
     document.getElementById('osint-article-log').innerHTML = log.length
       ? log.map(a => `<div class="article-log-item"><div class="art-title">${a.title||a.url}</div><div class="art-meta"><span class="art-status-${a.status}">${a.status.toUpperCase()}</span><span style="color:var(--text-lo);font-size:10px;font-family:var(--font-mono)">${a.feed||''}</span>${a.status==='ok'?`<span style="color:var(--green);font-size:10px;font-family:var(--font-mono)">+${a.entities}E +${a.relations}R</span>`:''}</div></div>`).join('')
-      : '<div class="empty-state"><div class="empty-icon">⊛</div>No articles ingested yet</div>';
+      : '<div class="empty-state"><div class="empty-icon">⊙</div>No articles ingested yet</div>';
     renderFeedList();
   } catch {}
 }
@@ -2343,21 +2686,25 @@ async function refreshOsintStatus() {
 async function renderFeedList() {
   try {
     const data = await API.get('/api/osint/feeds');
-    document.getElementById('feed-list').innerHTML = (data.feeds || []).map(f => `<div class="feed-item"><div><div class="feed-name">${f.name}</div><div class="feed-url">${f.url}</div></div><div class="feed-remove" onclick="removeFeed('${f.url}')">✕</div></div>`).join('') || '<div class="empty-state" style="padding:10px"><div class="empty-icon" style="font-size:20px">⊛</div>No feeds configured</div>';
+    document.getElementById('feed-list').innerHTML = (data.feeds || []).map(f =>
+      `<div class="feed-item"><div><div class="feed-name">${f.name}</div><div class="feed-url">${f.url}</div></div><div class="feed-remove" onclick="removeFeed('${f.url.replace(/'/g,'&apos;')}')">&#x2715;</div></div>`
+    ).join('') || '<div class="empty-state" style="padding:10px"><div class="empty-icon" style="font-size:20px">⊙</div>No feeds configured</div>';
   } catch {}
 }
 
 async function removeFeed(url) {
-  try { await fetch(`/api/osint/feeds?url=${encodeURIComponent(url)}`, { method: 'DELETE' }); toast('Feed removed','info'); renderFeedList(); } catch(e) { toast(e.message,'error'); }
+  try { await fetch(`/api/osint/feeds?url=${encodeURIComponent(url)}`, { method: 'DELETE' }); toast('Feed removed','info'); renderFeedList(); }
+  catch(e) { toast(e.message,'error'); }
 }
 
 document.getElementById('btn-add-feed').addEventListener('click', async () => {
-  const url = document.getElementById('feed-url-input').value.trim();
+  const url  = document.getElementById('feed-url-input').value.trim();
   const name = document.getElementById('feed-name-input').value.trim();
   if (!url) { toast('Enter a feed URL','warn'); return; }
   try {
     await API.post('/api/osint/feeds', { url, name });
-    document.getElementById('feed-url-input').value = ''; document.getElementById('feed-name-input').value = '';
+    document.getElementById('feed-url-input').value = '';
+    document.getElementById('feed-name-input').value = '';
     toast('Feed added','success'); renderFeedList();
   } catch(e) { toast(e.message,'error'); }
 });
@@ -2374,6 +2721,9 @@ document.getElementById('btn-gdelt-query').addEventListener('click', async () =>
   } catch(e) { toast(e.message,'error'); }
 });
 
+/* On tab switch, sync continuous status */
+const _origTabSwitch = typeof switchTab === 'function' ? switchTab : null;
+
 /* ── BOOT ────────────────────────────────────────────────────────────────────── */
 async function boot() {
   await checkOllama();
@@ -2382,6 +2732,19 @@ async function boot() {
     if (data) { S.graph = data.vis; S.analytics = data.analytics; updateHeader(data.analytics); }
   } catch {}
   loadSimHistory();
+  // Restore continuous loop UI state if server loop is already running
+  try {
+    const cs = await API.get('/api/osint/continuous/status');
+    if (cs.active) {
+      CL.active = true;
+      CL.cycle  = cs.cycle;
+      CL.intervalSecs = cs.interval_secs;
+      CL.cycleStartedAt = Date.now(); // approximate — server restart resets bar
+      setContinuousUI(true);
+      pollContinuousStatus();
+      startProgressBar();
+    }
+  } catch {}
   setInterval(checkOllama, 30_000);
 }
 
