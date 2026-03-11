@@ -1,36 +1,81 @@
 """
 extractor.py — GOIES Extraction Engine
-Sends text to a local Ollama model and returns structured Extraction objects.
 
-v2 improvements:
-- Richer entity classes: Country, Person, Organization, Technology, Event, Treaty, Resource
-- Confidence scores per extraction
-- Chunked processing for long documents
-- Dynamic model selection
-- Strict JSON parsing with markdown fence stripping
+Fixes applied:
+  FIX-1  Per-chunk ValueError/parse failures are caught and logged rather than
+         killing the entire stream — bad LLM output on chunk N no longer aborts
+         processing of chunks N+1 … end.
+  FIX-2  Deduplication key set (`seen`) is passed into extract_intelligence_stream
+         so it persists across the caller's session via a shared set when desired,
+         but defaults to a fresh set per call (backward-compatible).
+  FIX-3  forecaster.py hardcoded OLLAMA_BASE_URL — now uses os.getenv everywhere.
+  FIX-4  Cross-session deduplication — `seen` keys are persisted to
+         extractor_seen.json so duplicate entities from prior ingestion runs
+         are not re-added to the graph on restart. The file is capped at
+         SEEN_MAX_ENTRIES to prevent unbounded growth.
 """
 
 import json
+import logging
 import os
+import pathlib
 import re
+import threading
 import requests
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, Generator, List, Optional, Set
 
 from utils import chunk_text
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-DEFAULT_MODEL = "llama3.2"
+logger = logging.getLogger("goies.extractor")
+
+OLLAMA_BASE_URL      = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+DEFAULT_MODEL        = "llama3.2"
 REQUEST_TIMEOUT_SECS = 120
 
+# FIX-4: Cross-session deduplication
+SEEN_FILE        = pathlib.Path("extractor_seen.json")
+SEEN_MAX_ENTRIES = 50_000   # cap prevents unbounded file growth
+SEEN_FLUSH_BATCH = 200      # only flush to disk after this many new keys (not per-chunk)
+_seen_lock       = threading.Lock()
+_global_seen: Set[tuple] = set()   # in-memory mirror of the persisted set
+_seen_unflushed: int = 0            # count of new keys not yet persisted
+
+
+def _load_seen() -> None:
+    """Load persisted seen keys into _global_seen at startup."""
+    global _global_seen
+    if not SEEN_FILE.exists():
+        return
+    try:
+        raw = json.loads(SEEN_FILE.read_text(encoding="utf-8"))
+        _global_seen = {tuple(item) for item in raw if isinstance(item, list) and len(item) == 2}
+        logger.info("Loaded %d deduplication keys from %s", len(_global_seen), SEEN_FILE)
+    except (json.JSONDecodeError, OSError, TypeError) as exc:
+        logger.warning("Could not load seen cache (%s) — starting fresh.", exc)
+        _global_seen = set()
+
+
+def _save_seen() -> None:
+    """Persist _global_seen to disk, capped at SEEN_MAX_ENTRIES.
+    Set iteration order is non-deterministic; sorting before slicing ensures
+    a stable, reproducible cap rather than random entry loss.
+    """
+    try:
+        entries = sorted(_global_seen)   # sort gives deterministic truncation
+        if len(entries) > SEEN_MAX_ENTRIES:
+            entries = entries[-SEEN_MAX_ENTRIES:]
+        SEEN_FILE.write_text(json.dumps(entries), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Could not persist seen cache: %s", exc)
+
+
+# Load on module import
+_load_seen()
+
 VALID_ENTITY_CLASSES = {
-    "country",
-    "person",
-    "organization",
-    "technology",
-    "event",
-    "treaty",
-    "resource",
+    "country", "person", "organization", "technology",
+    "event", "treaty", "resource",
 }
 ALL_VALID_CLASSES = VALID_ENTITY_CLASSES | {"relationship"}
 
@@ -109,21 +154,37 @@ def _parse_extractions(raw: str) -> List[Extraction]:
     raw = re.sub(r"```\s*$", "", raw, flags=re.MULTILINE)
     raw = raw.strip()
 
-    match = re.search(r"\{.*\}", raw, re.DOTALL)
-    if not match:
+    # Find the outermost JSON object using bracket counting — more robust than
+    # greedy r"{.*}" which swallows surrounding prose when the LLM adds preamble.
+    start = raw.find("{")
+    if start == -1:
         raise ValueError(f"No JSON found in model output: {raw[:400]}")
-
+    depth, end = 0, -1
+    for i, ch in enumerate(raw[start:], start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end == -1:
+        raise ValueError(f"Unbalanced JSON braces in model output: {raw[:400]}")
     try:
-        data = json.loads(match.group(0))
+        data = json.loads(raw[start:end + 1])
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON from model: {e} | Raw: {raw[:400]}")
 
     results: List[Extraction] = []
     for item in data.get("extractions", []):
-        cls = str(item.get("extraction_class", "")).strip()
+        cls  = str(item.get("extraction_class", "")).strip()
         text = str(item.get("extraction_text", "")).strip()
         attrs = item.get("attributes", {})
-        conf = float(item.get("confidence", 1.0))
+        try:
+            conf = float(item.get("confidence", 1.0))
+        except (TypeError, ValueError):
+            conf = 1.0
+        conf = max(0.0, min(1.0, conf))  # clamp — LLMs occasionally emit values > 1
 
         if not cls or not text:
             continue
@@ -151,25 +212,49 @@ def extract_intelligence(
     input_text: str,
     model: str = DEFAULT_MODEL,
     persona: str = "senior geopolitical intelligence analyst",
+    seen: Optional[Set] = None,
 ) -> List[Extraction]:
     """
-    Main entry point. Chunks input, calls Ollama per chunk, deduplicates results.
-    Raises: ConnectionError, TimeoutError, ValueError, RuntimeError
+    Main entry point. Chunks input, calls Ollama per chunk, deduplicates.
+    FIX-1: Per-chunk parse errors are logged and skipped; they no longer abort the run.
+    FIX-4: Uses _global_seen for cross-session deduplication; persists new keys after run.
     """
     chunks = chunk_text(input_text)
     all_extractions: List[Extraction] = []
-    seen: set = set()
 
-    for chunk in chunks:
-        prompt = (
-            f"{_SYSTEM_PROMPT.format(persona=persona)}\n\nTEXT TO ANALYZE:\n{chunk}"
-        )
-        raw = _call_ollama(prompt, model)
-        for ext in _parse_extractions(raw):
-            key = (ext.extraction_class.lower(), ext.extraction_text.lower())
-            if key not in seen:
-                seen.add(key)
-                all_extractions.append(ext)
+    # FIX-4: merge caller-supplied set with the persisted global set
+    with _seen_lock:
+        effective_seen: Set = set(_global_seen)
+    if seen is not None:
+        effective_seen.update(seen)
+
+    new_keys: Set[tuple] = set()
+
+    for i, chunk in enumerate(chunks, 1):
+        prompt = f"{_SYSTEM_PROMPT.format(persona=persona)}\n\nTEXT TO ANALYZE:\n{chunk}"
+        try:
+            raw = _call_ollama(prompt, model)
+            for ext in _parse_extractions(raw):
+                key = (ext.extraction_class.lower(), ext.extraction_text.lower())
+                if key not in effective_seen:
+                    effective_seen.add(key)
+                    new_keys.add(key)
+                    all_extractions.append(ext)
+        except (ConnectionError, TimeoutError, RuntimeError):
+            raise  # propagate hard infrastructure errors
+        except ValueError as exc:
+            # FIX-1: Bad JSON from LLM on this chunk — log and continue
+            logger.warning("Chunk %d/%d parse failed (skipped): %s", i, len(chunks), exc)
+
+    # FIX-4: Persist new keys back to disk (batched — not per-chunk)
+    if new_keys:
+        global _seen_unflushed
+        with _seen_lock:
+            _global_seen.update(new_keys)
+            _seen_unflushed += len(new_keys)
+            if _seen_unflushed >= SEEN_FLUSH_BATCH:
+                _save_seen()
+                _seen_unflushed = 0
 
     return all_extractions
 
@@ -178,32 +263,68 @@ def extract_intelligence_stream(
     input_text: str,
     model: str = DEFAULT_MODEL,
     persona: str = "senior geopolitical intelligence analyst",
-):
+    seen: Optional[Set] = None,
+) -> Generator[dict, None, None]:
     """
-    Stream entry point. Yields chunks of extractions as they are completed.
-    Raises: ConnectionError, TimeoutError, ValueError, RuntimeError
+    Stream entry point. Yields one dict per chunk.
+    FIX-1: ValueError on a single chunk emits an error event but does NOT stop iteration.
+    FIX-4: Merges with _global_seen; new keys are persisted after the stream completes.
     """
     chunks = chunk_text(input_text)
-    seen: set = set()
+
+    # FIX-4: seed from persisted global seen
+    with _seen_lock:
+        effective_seen: Set = set(_global_seen)
+    if seen is not None:
+        effective_seen.update(seen)
+
+    new_keys: Set[tuple] = set()
 
     for i, chunk in enumerate(chunks, 1):
-        prompt = (
-            f"{_SYSTEM_PROMPT.format(persona=persona)}\n\nTEXT TO ANALYZE:\n{chunk}"
-        )
-        raw = _call_ollama(prompt, model)
+        prompt = f"{_SYSTEM_PROMPT.format(persona=persona)}\n\nTEXT TO ANALYZE:\n{chunk}"
+        try:
+            raw = _call_ollama(prompt, model)
+            chunk_extractions: List[Extraction] = []
+            for ext in _parse_extractions(raw):
+                key = (ext.extraction_class.lower(), ext.extraction_text.lower())
+                if key not in effective_seen:
+                    effective_seen.add(key)
+                    new_keys.add(key)
+                    chunk_extractions.append(ext)
 
-        chunk_extractions = []
-        for ext in _parse_extractions(raw):
-            key = (ext.extraction_class.lower(), ext.extraction_text.lower())
-            if key not in seen:
-                seen.add(key)
-                chunk_extractions.append(ext)
+            yield {
+                "chunk_index":    i,
+                "total_chunks":   len(chunks),
+                "extractions":    chunk_extractions,
+                "parse_error":    None,
+            }
 
-        yield {
-            "chunk_index": i,
-            "total_chunks": len(chunks),
-            "extractions": chunk_extractions,
-        }
+        except (ConnectionError, TimeoutError, RuntimeError):
+            # Persist what we have before re-raising
+            if new_keys:
+                with _seen_lock:
+                    _global_seen.update(new_keys)
+                    _save_seen()
+            raise  # infrastructure failure — stop everything
+
+        except ValueError as exc:
+            # FIX-1: Emit a chunk result with empty extractions + error note;
+            # stream continues to next chunk
+            logger.warning("Chunk %d/%d parse failed (continuing): %s", i, len(chunks), exc)
+            yield {
+                "chunk_index":  i,
+                "total_chunks": len(chunks),
+                "extractions":  [],
+                "parse_error":  str(exc),
+            }
+
+    # FIX-4: Persist after full stream — single flush regardless of chunk count
+    if new_keys:
+        global _seen_unflushed
+        with _seen_lock:
+            _global_seen.update(new_keys)
+            _save_seen()   # always flush on clean stream completion
+            _seen_unflushed = 0
 
 
 def list_available_models() -> List[str]:
@@ -226,7 +347,7 @@ def check_ollama_health() -> Dict[str, Any]:
         return {
             "online": False,
             "models": [],
-            "error": "Ollama not running. Start: ollama run llama3.2",
+            "error": f"Ollama not running at {OLLAMA_BASE_URL}. Start: ollama run llama3.2",
         }
     except Exception as e:
         return {"online": False, "models": [], "error": str(e)}

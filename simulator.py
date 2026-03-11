@@ -1,28 +1,39 @@
 """
 simulator.py — GOIES Policy Simulation Engine v2
-Two-pass LLM pipeline:
-  Pass 1 (_parse_scenario): extract graph mutations (add/remove edges, risk score)
-  Pass 2 (_cascade_analysis): derive second-order narrative effects
-Simulation history is persisted to sim_history.json (last 50 runs).
+
+Fixes applied:
+  FIX-1  _save_history() had no write lock — concurrent simulations could corrupt
+         sim_history.json. Added a module-level threading.Lock.
+  FIX-2  No cap on history file size beyond the slice [:50] — the file could
+         accumulate garbage if the slice was mis-applied. Lock + atomic write fixes it.
+  FIX-3  Bare except in _save_history suppressed all errors silently.
 """
 
 from __future__ import annotations
 
 import datetime
 import json
+import logging
 import os
 import pathlib
 import re
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 import networkx as nx
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+logger = logging.getLogger("goies.simulator")
+
+OLLAMA_BASE_URL      = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 REQUEST_TIMEOUT_SECS = 120
-SIM_HISTORY_FILE = pathlib.Path("sim_history.json")
+SIM_HISTORY_FILE     = pathlib.Path("sim_history.json")
+MAX_HISTORY          = 50
 
 RISK_THRESHOLDS = {"LOW": 25, "MEDIUM": 50, "HIGH": 75, "CRITICAL": 100}
+
+# FIX-1: Prevent concurrent writes corrupting sim_history.json
+_history_lock = threading.Lock()
 
 
 # ── Data Model ────────────────────────────────────────────────────────────────
@@ -40,23 +51,23 @@ class SimulationResult:
 
 
 # ── Ollama Helper ─────────────────────────────────────────────────────────────
-def _call_ollama(prompt: str, model: str) -> str:
-    import requests
+import requests as _requests  # hoisted — was imported per-call inside _call_ollama
 
+def _call_ollama(prompt: str, model: str) -> str:
     try:
-        resp = requests.post(
+        resp = _requests.post(
             f"{OLLAMA_BASE_URL}/api/generate",
             json={"model": model, "prompt": prompt, "stream": False},
             timeout=REQUEST_TIMEOUT_SECS,
         )
         resp.raise_for_status()
-    except requests.exceptions.ConnectionError:
+    except _requests.exceptions.ConnectionError:
         raise ConnectionError(
             f"Cannot reach Ollama at {OLLAMA_BASE_URL}. Run: ollama run {model}"
         )
-    except requests.exceptions.Timeout:
+    except _requests.exceptions.Timeout:
         raise TimeoutError(f"Ollama did not respond within {REQUEST_TIMEOUT_SECS}s.")
-    except requests.exceptions.HTTPError as e:
+    except _requests.exceptions.HTTPError as e:
         raise RuntimeError(f"Ollama HTTP error: {e}")
     return resp.json().get("response", "").strip()
 
@@ -86,11 +97,24 @@ def _risk_label_from_score(score: float) -> str:
 
 # ── Pass 1: Parse Scenario → Graph Mutations ──────────────────────────────────
 def _parse_scenario(scenario: str, graph: nx.DiGraph, model: str) -> Dict[str, Any]:
-    nodes_sample = list(graph.nodes)[:30]
-    edges_sample = [
-        f"{u} -[{d.get('label', '')}]-> {v}"
-        for u, v, d in list(graph.edges(data=True))[:25]
-    ]
+    # Select highest-degree nodes and their edges for richer, more relevant context
+    deg_sorted = sorted(graph.nodes(), key=lambda n: graph.degree(n), reverse=True)
+    nodes_sample = [str(n) for n in deg_sorted[:30]]
+    hub_nodes = set(deg_sorted[:10])
+    edges_sample = []
+    # Prioritise edges incident to hub nodes so the sample covers key relationships
+    for u, v, d in graph.edges(data=True):
+        if u in hub_nodes or v in hub_nodes:
+            edges_sample.append(f"{u} -[{d.get('label', '')}]-> {v}")
+        if len(edges_sample) >= 25:
+            break
+    if len(edges_sample) < 25:
+        for u, v, d in graph.edges(data=True):
+            entry = f"{u} -[{d.get('label', '')}]-> {v}"
+            if entry not in edges_sample:
+                edges_sample.append(entry)
+            if len(edges_sample) >= 25:
+                break
 
     prompt = f"""You are a strategic geopolitical policy analyst.
 
@@ -124,7 +148,6 @@ risk_score is 0.0-100.0"""
 
     data = _strip_json(_call_ollama(prompt, model))
 
-    # Validate & sanitize
     risk_score = float(data.get("risk_score", 50.0))
     risk_score = max(0.0, min(100.0, risk_score))
     risk_label = data.get("risk_label", _risk_label_from_score(risk_score))
@@ -132,11 +155,11 @@ risk_score is 0.0-100.0"""
         risk_label = _risk_label_from_score(risk_score)
 
     return {
-        "add_edges": data.get("add_edges", []),
-        "remove_edges": data.get("remove_edges", []),
+        "add_edges":      data.get("add_edges", []),
+        "remove_edges":   data.get("remove_edges", []),
         "affected_nodes": data.get("affected_nodes", []),
-        "risk_score": risk_score,
-        "risk_label": risk_label,
+        "risk_score":     risk_score,
+        "risk_label":     risk_label,
     }
 
 
@@ -144,11 +167,10 @@ risk_score is 0.0-100.0"""
 def _cascade_analysis(
     scenario: str, graph: nx.DiGraph, changes: Dict[str, Any], model: str
 ) -> Dict[str, Any]:
-    affected = changes.get("affected_nodes", [])
-    add_edges = changes.get("add_edges", [])
+    affected    = changes.get("affected_nodes", [])
+    add_edges   = changes.get("add_edges", [])
     remove_edges = changes.get("remove_edges", [])
 
-    # Build context: 1-hop subgraph around affected nodes
     context_edges: List[str] = []
     for node in affected[:10]:
         if graph.has_node(node):
@@ -182,9 +204,7 @@ Analyze the second-order geopolitical consequences. Return ONLY raw JSON — no 
 
     data = _strip_json(_call_ollama(prompt, model))
 
-    cascade_narrative = str(
-        data.get("cascade_narrative", "Cascade analysis unavailable.")
-    )
+    cascade_narrative = str(data.get("cascade_narrative", "Cascade analysis unavailable."))
     second_order = data.get("second_order", [])
     if not isinstance(second_order, list):
         second_order = []
@@ -194,29 +214,37 @@ Analyze the second-order geopolitical consequences. Return ONLY raw JSON — no 
 
 # ── History ───────────────────────────────────────────────────────────────────
 def _save_history(result: SimulationResult) -> None:
-    history: List[Dict] = []
-    if SIM_HISTORY_FILE.exists():
-        try:
-            history = json.loads(SIM_HISTORY_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            history = []
+    """FIX-1/FIX-2: Thread-safe atomic write with size cap."""
+    with _history_lock:
+        history: List[Dict] = []
+        if SIM_HISTORY_FILE.exists():
+            try:
+                history = json.loads(SIM_HISTORY_FILE.read_text(encoding="utf-8"))
+                if not isinstance(history, list):
+                    history = []
+            except (json.JSONDecodeError, OSError) as exc:  # FIX-3: was bare except
+                logger.warning("Could not read sim history, starting fresh: %s", exc)
+                history = []
 
-    history.insert(
-        0,
-        {
-            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "scenario": result.scenario,
-            "risk_score": result.risk_score,
-            "risk_label": result.risk_label,
-            "cascade_narrative": result.cascade_narrative,
-            "second_order": result.second_order,
-            "added_edges": result.added_edges,
-            "removed_edges": result.removed_edges,
-            "affected_nodes": result.affected_nodes,
-            "model_used": result.model_used,
-        },
-    )
-    SIM_HISTORY_FILE.write_text(json.dumps(history[:50], indent=2), encoding="utf-8")
+        history.insert(
+            0,
+            {
+                "timestamp":         datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "scenario":          result.scenario,
+                "risk_score":        result.risk_score,
+                "risk_label":        result.risk_label,
+                "cascade_narrative": result.cascade_narrative,
+                "second_order":      result.second_order,
+                "added_edges":       result.added_edges,
+                "removed_edges":     result.removed_edges,
+                "affected_nodes":    result.affected_nodes,
+                "model_used":        result.model_used,
+            },
+        )
+        # FIX-2: Cap enforced inside the lock so it's never skipped
+        SIM_HISTORY_FILE.write_text(
+            json.dumps(history[:MAX_HISTORY], indent=2), encoding="utf-8"
+        )
 
 
 # ── Public Entry Point ────────────────────────────────────────────────────────

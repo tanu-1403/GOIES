@@ -48,7 +48,15 @@ def chunk_text(
             if current:
                 chunks.append(current)
             overlap_text = chunks[-1][-overlap:].strip() if chunks else ""
-            current = (overlap_text + " " + sentence).strip()
+            base = (overlap_text + " " + sentence).strip()
+            # Hard fallback: a single sentence longer than max_chars gets force-split
+            if len(base) > max_chars:
+                while len(base) > max_chars:
+                    chunks.append(base[:max_chars])
+                    base = base[max_chars - overlap:]
+                current = base
+            else:
+                current = base
     if current:
         chunks.append(current)
     return chunks or [text]
@@ -59,16 +67,45 @@ def _similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
 
+# Resolution cache: maps (graph_id, raw_lower_name) → canonical node name.
+# Keyed on id(graph) so it is automatically invalidated when the graph object
+# is replaced (e.g. after a clear).  Cache is bounded to 10 000 entries.
+_resolve_cache: dict = {}
+_RESOLVE_CACHE_MAX = 10_000
+
+
 def resolve_node_name(graph: nx.DiGraph, raw_name: str) -> str:
-    for node in graph.nodes:
-        if node.lower() == raw_name.lower():
-            return node
+    raw_lower = raw_name.lower()
+    cache_key = (id(graph), raw_lower)
+
+    # Fast path: cache hit
+    if cache_key in _resolve_cache:
+        cached = _resolve_cache[cache_key]
+        # Validate the cached node still exists (graph may have grown)
+        if cached in graph or cached == raw_name:
+            return cached
+        else:
+            del _resolve_cache[cache_key]
+
+    # Slow path: O(n) scan
     best_score, best_match = 0.0, None
     for node in graph.nodes:
-        score = _similarity(node, raw_name)
+        node_str = str(node)
+        if node_str.lower() == raw_lower:
+            # Exact match — cache and return immediately
+            if len(_resolve_cache) >= _RESOLVE_CACHE_MAX:
+                _resolve_cache.clear()
+            _resolve_cache[cache_key] = node
+            return node
+        score = _similarity(node_str, raw_name)
         if score > best_score:
             best_score, best_match = score, node
-    return best_match if best_score >= FUZZY_THRESHOLD else raw_name
+
+    result = best_match if best_score >= FUZZY_THRESHOLD else raw_name
+    if len(_resolve_cache) >= _RESOLVE_CACHE_MAX:
+        _resolve_cache.clear()
+    _resolve_cache[cache_key] = result
+    return result
 
 
 def merge_nodes(graph: nx.DiGraph, source_node: str, target_node: str) -> bool:
@@ -110,11 +147,25 @@ def merge_nodes(graph: nx.DiGraph, source_node: str, target_node: str) -> bool:
 
 
 # ── Graph Persistence ─────────────────────────────────────────────────────────
+_last_snapshot_time: float = 0.0
+_SNAPSHOT_MIN_INTERVAL = 30.0  # seconds — prevents one snapshot per chunk during streaming
+
 def save_graph(graph: nx.DiGraph, path: pathlib.Path = GRAPH_SAVE_PATH) -> None:
+    import time as _time
+    global _last_snapshot_time
+
     data = nx.node_link_data(graph)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
-    # FIX-2: Timestamped snapshot with automatic rotation
+    # FIX-2: Timestamped snapshot with automatic rotation.
+    # Debounced: skip snapshot if one was written less than _SNAPSHOT_MIN_INTERVAL ago.
+    # During streaming extraction (one save/chunk), this avoids writing + rotating 50
+    # snapshot files per ingest while still capturing a snapshot after each real session.
+    now = _time.monotonic()
+    if now - _last_snapshot_time < _SNAPSHOT_MIN_INTERVAL:
+        return
+    _last_snapshot_time = now
+
     snapshots_dir = pathlib.Path("goies_snapshots")
     snapshots_dir.mkdir(exist_ok=True)
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
@@ -123,11 +174,11 @@ def save_graph(graph: nx.DiGraph, path: pathlib.Path = GRAPH_SAVE_PATH) -> None:
 
     # Rotate: delete oldest snapshots beyond MAX_SNAPSHOTS
     existing = sorted(snapshots_dir.glob("goies_graph_v_*.json"))
-    for old in existing[:-MAX_SNAPSHOTS]:
+    for snap in existing[:-MAX_SNAPSHOTS]:
         try:
-            old.unlink()
+            snap.unlink()
         except OSError as exc:
-            logger.warning("Could not delete old snapshot %s: %s", old, exc)
+            logger.warning("Could not delete old snapshot %s: %s", snap, exc)
 
 
 def load_graph(path: pathlib.Path = GRAPH_SAVE_PATH) -> nx.DiGraph:
@@ -142,20 +193,27 @@ def load_graph(path: pathlib.Path = GRAPH_SAVE_PATH) -> nx.DiGraph:
 
 
 # ── Graph Analytics ───────────────────────────────────────────────────────────
+# Canonical keyword lists — also referenced in forecaster.py (kept in sync manually
+# until a shared constants module is introduced).
+HOSTILE_KEYWORDS = [
+    "sanction", "attack", "invade", "bomb", "missile", "strike", "kill",
+    "threaten", "blockade", "terrorize", "restrict", "ban", "expel",
+    "dispute", "tension", "pressure", "cyber", "confront", "war", "conflict",
+]
+COOPERATIVE_KEYWORDS = [
+    "cooperate", "ally", "partner", "invest", "aid", "support", "trade",
+    "treaty", "agreement", "join",
+]
+
+
 def _is_hostile(label: str) -> bool:
-    keywords = [
-        "sanction", "attack", "invade", "bomb", "missile", "strike", "kill",
-        "threaten", "blockade", "terrorize", "restrict", "ban", "expel",
-        "dispute", "tension", "pressure", "cyber", "confront",
-    ]
+    keywords = HOSTILE_KEYWORDS
     label = label.lower()
     return any(k in label for k in keywords)
 
 
 def _is_cooperative(label: str) -> bool:
-    keywords = [
-        "cooperate", "ally", "partner", "invest", "aid", "support", "trade", "treaty",
-    ]
+    keywords = COOPERATIVE_KEYWORDS
     label = label.lower()
     return any(k in label for k in keywords)
 
@@ -202,7 +260,17 @@ def graph_health_score(graph: nx.DiGraph) -> Dict[str, Any]:
     group_diversity = len(set(groups)) / 7.0 if graph.number_of_nodes() > 0 else 0
 
     labels = [d.get("label", "") for _, _, d in graph.edges(data=True)]
-    label_diversity = min(1.0, len(set(labels)) / max(len(labels) * 0.3, 1))
+    # FIX-5: Exclude blank labels before scoring diversity.
+    # Previously len(set(labels)) counted "" as a unique label, giving score 1.0
+    # (perfect) for a fully-unlabelled graph — the opposite of the intended signal.
+    nonempty_labels = [lbl for lbl in labels if lbl.strip()]
+    if not nonempty_labels:
+        label_diversity = 0.0
+    else:
+        # Ratio of unique labels to total non-empty labels. Capped at 1.0.
+        # A graph where every edge has a distinct label scores 1.0 (perfectly diverse).
+        # Previously the formula divided by 0.3×total which allowed scores > 1 before the min() cap.
+        label_diversity = min(1.0, len(set(nonempty_labels)) / len(nonempty_labels))
 
     avg_edges = graph.number_of_edges() / max(graph.number_of_nodes(), 1)
     edge_density_score = min(1.0, avg_edges / 3.0)
@@ -293,9 +361,23 @@ def retrieve_graph_context(
 
     seed_nodes: set = set()
     for node in graph.nodes:
-        node_words = set(re.sub(r"[^\w\s]", "", node.lower()).split())
+        node_str = str(node)
+        node_words = set(re.sub(r"[^\w\s]", "", node_str.lower()).split())
         if query_words & node_words:
             seed_nodes.add(node)
+
+    # Fuzzy fallback: if no exact word match found, pick nodes with highest name
+    # similarity to any query word so context is never completely off-topic
+    if not seed_nodes and query_words:
+        best_score, best_node = 0.0, None
+        for node in graph.nodes:
+            node_str = str(node)
+            for w in query_words:
+                score = _similarity(node_str, w)
+                if score > best_score:
+                    best_score, best_node = score, node
+        if best_node and best_score > 0.4:
+            seed_nodes.add(best_node)
 
     visited, frontier = set(seed_nodes), set(seed_nodes)
     for _ in range(max_hops):

@@ -13,7 +13,9 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import networkx as nx
 
-OLLAMA_BASE_URL = "http://localhost:11434"
+import os
+import requests as _requests  # hoisted — was imported inside _call_ollama per-call
+OLLAMA_BASE_URL = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 REQUEST_TIMEOUT_SECS = 150
 
 HOSTILE_KEYWORDS = [
@@ -78,32 +80,50 @@ class ForecastResult:
 
 # ── Ollama Helper ─────────────────────────────────────────────────────────────
 def _call_ollama(prompt: str, model: str) -> str:
-    import requests
-
     try:
-        resp = requests.post(
+        resp = _requests.post(
             f"{OLLAMA_BASE_URL}/api/generate",
             json={"model": model, "prompt": prompt, "stream": False},
             timeout=REQUEST_TIMEOUT_SECS,
         )
         resp.raise_for_status()
-    except requests.exceptions.ConnectionError:
+    except _requests.exceptions.ConnectionError:
         raise ConnectionError(f"Cannot reach Ollama at {OLLAMA_BASE_URL}.")
-    except requests.exceptions.Timeout:
+    except _requests.exceptions.Timeout:
         raise TimeoutError("Ollama timed out during forecast generation.")
-    except requests.exceptions.HTTPError as e:
+    except _requests.exceptions.HTTPError as e:
         raise RuntimeError(f"Ollama HTTP error: {e}")
     return resp.json().get("response", "").strip()
 
 
 def _strip_json(raw: str) -> Any:
+    """Extract outermost JSON object or array using bracket counting.
+    More robust than greedy regex when LLM prepends prose before the JSON.
+    """
     raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
     raw = re.sub(r"```\s*$", "", raw, flags=re.MULTILINE)
     raw = raw.strip()
-    match = re.search(r"(\{.*\}|\[.*\])", raw, re.DOTALL)
-    if not match:
-        raise ValueError(f"No JSON in LLM output: {raw[:300]}")
-    return json.loads(match.group(0))
+
+    # Find the first { or [ and balance brackets from there
+    for start_char, end_char in [('{', '}'), ('[', ']')]:
+        start = raw.find(start_char)
+        if start == -1:
+            continue
+        depth, end = 0, -1
+        for i, ch in enumerate(raw[start:], start):
+            if ch == start_char:
+                depth += 1
+            elif ch == end_char:
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end != -1:
+            try:
+                return json.loads(raw[start:end + 1])
+            except json.JSONDecodeError:
+                continue  # try the other bracket type
+    raise ValueError(f"No valid JSON in LLM output: {raw[:300]}")
 
 
 def _is_hostile(label: str) -> bool:
@@ -225,7 +245,7 @@ def _structural_signals(graph: nx.DiGraph) -> Dict[str, Any]:
 # ── LLM Forecast Generation ───────────────────────────────────────────────────
 def _generate_forecasts(
     graph: nx.DiGraph, signals: Dict[str, Any], model: str, focus_query: str
-) -> List[ForecastItem]:
+) -> tuple:
     hotspots = signals["hotspot_nodes"]
     reciprocal = signals["reciprocal_pairs"]
     triangles = signals["conflict_triangles"]
