@@ -1713,6 +1713,16 @@ const GROUP_COLORS = {
 };
 
 /* ── TOAST ───────────────────────────────────────────────────────────────────── */
+/* ── HTML ESCAPE HELPER — used wherever LLM-derived strings go into innerHTML ── */
+function esc(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function toast(msg, type = 'info') {
   const el = document.createElement('div');
   el.className = `toast ${type}`;
@@ -1918,15 +1928,16 @@ document.getElementById('btn-extract').addEventListener('click', async () => {
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
       buffer = lines.pop();
+      let _streamDone = false;
       for (const line of lines) {
         if (!line.startsWith('data:')) continue;
         try {
           const payload = JSON.parse(line.slice(6));
-          if (payload.error) { logLine(`✗ ${payload.error}`, 'err'); break; }
+          if (payload.error) { logLine(`✗ ${payload.error}`, 'err'); _streamDone = true; break; }
           if (payload.parse_error) logLine(`⚠ Chunk ${payload.chunk} parse error (skipped): ${payload.parse_error}`, 'warn');
           if (payload.done) {
             logLine(`✓ Extraction complete: ${payload.totals.entities}E ${payload.totals.relations}R ${payload.totals.new_nodes.length} new nodes`, 'ok');
-            break;
+            _streamDone = true; break;
           }
           const pct = Math.round((payload.chunk / payload.total_chunks) * 100);
           document.getElementById('progress-bar').style.width = pct + '%';
@@ -1951,6 +1962,7 @@ document.getElementById('btn-extract').addEventListener('click', async () => {
           }
         } catch {}
       }
+      if (_streamDone) break;  // exit outer while(true) — stream complete or errored
     }
     document.getElementById('res-entities').textContent = totalEntities;
     document.getElementById('res-relations').textContent = totalRelations;
@@ -1985,7 +1997,10 @@ async function loadGraphData() {
     updateHeader(data.analytics);
     S.allGroups = [...new Set((S.graph.nodes || []).map(n => n.group || 'unknown'))];
     return data;
-  } catch(e) { return null; }
+  } catch(e) {
+    // Return null — callers must check before dereferencing
+    return null;
+  }
 }
 
 /* ── VIS.JS GRAPH ────────────────────────────────────────────────────────────── */
@@ -2021,17 +2036,18 @@ function inspectNode(nodeId) {
   const edges_in  = (S.graph.edges || []).filter(e => e.to === nodeId);
   // FIX-4: Use pre-parsed _attrs dict from server — never eval() user-controlled data
   const attrs = (typeof nodeData._attrs === 'object' && nodeData._attrs) ? nodeData._attrs : {};
+  const safeId = esc(nodeId);
   inspector.innerHTML = `
-    <div class="node-name">${nodeId}</div>
-    <div class="node-group-badge" style="background:${color}22;border:1px solid ${color}44;color:${color}">${(nodeData.group||'unknown').toUpperCase()}</div>
+    <div class="node-name">${safeId}</div>
+    <div class="node-group-badge" style="background:${color}22;border:1px solid ${color}44;color:${color}">${esc((nodeData.group||'unknown').toUpperCase())}</div>
     <div class="attr-row"><span class="attr-key">CONFIDENCE</span><span class="attr-val">${((nodeData.confidence||1)*100).toFixed(0)}%</span></div>
-    ${Object.entries(attrs).map(([k,v]) => `<div class="attr-row"><span class="attr-key">${k}</span><span class="attr-val">${v}</span></div>`).join('')}
+    ${Object.entries(attrs).map(([k,v]) => `<div class="attr-row"><span class="attr-key">${esc(k)}</span><span class="attr-val">${esc(v)}</span></div>`).join('')}
     <div class="section-title" style="margin-top:12px">OUTGOING (${edges_out.length})</div>
-    ${edges_out.slice(0,8).map(e => `<div class="rel-item">${nodeId}<span class="arrow">→</span>${e.to}<br/><span class="label">${e.label||''}</span></div>`).join('')}
+    ${edges_out.slice(0,8).map(e => `<div class="rel-item">${safeId}<span class="arrow">→</span>${esc(e.to)}<br/><span class="label">${esc(e.label||'')}</span></div>`).join('')}
     <div class="section-title" style="margin-top:8px">INCOMING (${edges_in.length})</div>
-    ${edges_in.slice(0,8).map(e => `<div class="rel-item">${e.from}<span class="arrow">→</span>${nodeId}<br/><span class="label">${e.label||''}</span></div>`).join('')}
+    ${edges_in.slice(0,8).map(e => `<div class="rel-item">${esc(e.from)}<span class="arrow">→</span>${safeId}<br/><span class="label">${esc(e.label||'')}</span></div>`).join('')}
     <div style="margin-top:12px;display:flex;gap:6px">
-      <button class="btn btn-ghost btn-sm" style="flex:1" onclick="filterEgo('${nodeId}')">EGO VIEW</button>
+      <button class="btn btn-ghost btn-sm" style="flex:1" data-ego-node="${safeId}" onclick="filterEgo(this.dataset.egoNode)">EGO VIEW</button>
     </div>
   `;
 }
@@ -2157,8 +2173,8 @@ function renderSimResult(data) {
   document.getElementById('sim-risk-score').textContent = Math.round(data.risk_score);
   document.getElementById('sim-risk-label').textContent = data.risk_label; document.getElementById('sim-risk-label').style.color = color;
   document.getElementById('sim-cascade').textContent = data.cascade_narrative;
-  document.getElementById('sim-second-order').innerHTML = (data.second_order || []).map(e => `<div class="second-order-item">${e}</div>`).join('');
-  document.getElementById('sim-affected').innerHTML = (data.affected_nodes || []).map(n => `<span class="anode">${n}</span>`).join('');
+  document.getElementById('sim-second-order').innerHTML = (data.second_order || []).map(e => `<div class="second-order-item">${esc(e)}</div>`).join('');
+  document.getElementById('sim-affected').innerHTML = (data.affected_nodes || []).map(n => `<span class="anode">${esc(n)}</span>`).join('');
   document.getElementById('sim-result-empty').style.display = 'none';
   document.getElementById('sim-result').style.display = 'block';
 }
@@ -2168,11 +2184,14 @@ async function loadSimHistory() {
     const data = await API.get('/api/simulations');
     const list = document.getElementById('sim-history-list');
     if (!data.history?.length) { list.innerHTML = '<div class="empty-state"><div class="empty-icon">⟁</div>No simulations yet</div>'; return; }
-    list.innerHTML = data.history.slice(0,10).map(h => {
+    // Store history in a module cache — avoids inline JSON in onclick which breaks
+    // when scenario text contains apostrophes or double-quotes.
+    window._simHistoryCache = data.history.slice(0,10);
+    list.innerHTML = window._simHistoryCache.map((h, i) => {
       const color = { LOW:'#00ff88', MEDIUM:'#ffaa00', HIGH:'#ff6b35', CRITICAL:'#ff2244' }[h.risk_label] || '#00d4ff';
-      return `<div class="sim-history-item" onclick="renderSimResult(${JSON.stringify(h).replace(/"/g,'&quot;')})">
-        <div class="scenario-text">${h.scenario}</div>
-        <div class="sim-meta"><span class="risk-pill" style="background:${color}22;color:${color};border:1px solid ${color}44">${h.risk_label}</span><span class="text-lo" style="font-size:10px;font-family:var(--font-mono)">${new Date(h.timestamp).toLocaleTimeString()}</span></div>
+      return `<div class="sim-history-item" data-sim-idx="${i}" onclick="renderSimResult(window._simHistoryCache[+this.dataset.simIdx])">
+        <div class="scenario-text">${esc(h.scenario)}</div>
+        <div class="sim-meta"><span class="risk-pill" style="background:${color}22;color:${color};border:1px solid ${color}44">${esc(h.risk_label)}</span><span class="text-lo" style="font-size:10px;font-family:var(--font-mono)">${new Date(h.timestamp).toLocaleTimeString()}</span></div>
       </div>`;
     }).join('');
   } catch {}
@@ -2596,8 +2615,12 @@ async function refreshContinuousStatus() {
     if (data.graph_nodes !== S.graph?.nodes?.length) {
       try {
         const gd = await loadGraphData();
-        if (gd) { S.graph = gd.vis; S.analytics = gd.analytics; updateHeader(gd.analytics); }
-        if (S.network) S.network.setData({ nodes: new vis.DataSet(gd.vis.nodes), edges: new vis.DataSet(gd.vis.edges) });
+        if (gd) {
+          S.graph = gd.vis;
+          S.analytics = gd.analytics;
+          updateHeader(gd.analytics);
+          if (S.network) S.network.setData({ nodes: new vis.DataSet(gd.vis.nodes || []), edges: new vis.DataSet(gd.vis.edges || []) });
+        }
       } catch {}
     }
   } catch {}
