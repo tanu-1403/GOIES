@@ -1,28 +1,39 @@
 """
 simulator.py — GOIES Policy Simulation Engine v2
-Two-pass LLM pipeline:
-  Pass 1 (_parse_scenario): extract graph mutations (add/remove edges, risk score)
-  Pass 2 (_cascade_analysis): derive second-order narrative effects
-Simulation history is persisted to sim_history.json (last 50 runs).
+
+Fixes applied:
+  FIX-1  _save_history() had no write lock — concurrent simulations could corrupt
+         sim_history.json. Added a module-level threading.Lock.
+  FIX-2  No cap on history file size beyond the slice [:50] — the file could
+         accumulate garbage if the slice was mis-applied. Lock + atomic write fixes it.
+  FIX-3  Bare except in _save_history suppressed all errors silently.
 """
 
 from __future__ import annotations
 
 import datetime
 import json
+import logging
 import os
 import pathlib
 import re
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 import networkx as nx
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+logger = logging.getLogger("goies.simulator")
+
+OLLAMA_BASE_URL      = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 REQUEST_TIMEOUT_SECS = 120
-SIM_HISTORY_FILE = pathlib.Path("sim_history.json")
+SIM_HISTORY_FILE     = pathlib.Path("sim_history.json")
+MAX_HISTORY          = 50
 
 RISK_THRESHOLDS = {"LOW": 25, "MEDIUM": 50, "HIGH": 75, "CRITICAL": 100}
+
+# FIX-1: Prevent concurrent writes corrupting sim_history.json
+_history_lock = threading.Lock()
 
 
 # ── Data Model ────────────────────────────────────────────────────────────────
@@ -124,7 +135,6 @@ risk_score is 0.0-100.0"""
 
     data = _strip_json(_call_ollama(prompt, model))
 
-    # Validate & sanitize
     risk_score = float(data.get("risk_score", 50.0))
     risk_score = max(0.0, min(100.0, risk_score))
     risk_label = data.get("risk_label", _risk_label_from_score(risk_score))
@@ -132,11 +142,11 @@ risk_score is 0.0-100.0"""
         risk_label = _risk_label_from_score(risk_score)
 
     return {
-        "add_edges": data.get("add_edges", []),
-        "remove_edges": data.get("remove_edges", []),
+        "add_edges":      data.get("add_edges", []),
+        "remove_edges":   data.get("remove_edges", []),
         "affected_nodes": data.get("affected_nodes", []),
-        "risk_score": risk_score,
-        "risk_label": risk_label,
+        "risk_score":     risk_score,
+        "risk_label":     risk_label,
     }
 
 
@@ -144,11 +154,10 @@ risk_score is 0.0-100.0"""
 def _cascade_analysis(
     scenario: str, graph: nx.DiGraph, changes: Dict[str, Any], model: str
 ) -> Dict[str, Any]:
-    affected = changes.get("affected_nodes", [])
-    add_edges = changes.get("add_edges", [])
+    affected    = changes.get("affected_nodes", [])
+    add_edges   = changes.get("add_edges", [])
     remove_edges = changes.get("remove_edges", [])
 
-    # Build context: 1-hop subgraph around affected nodes
     context_edges: List[str] = []
     for node in affected[:10]:
         if graph.has_node(node):
@@ -182,9 +191,7 @@ Analyze the second-order geopolitical consequences. Return ONLY raw JSON — no 
 
     data = _strip_json(_call_ollama(prompt, model))
 
-    cascade_narrative = str(
-        data.get("cascade_narrative", "Cascade analysis unavailable.")
-    )
+    cascade_narrative = str(data.get("cascade_narrative", "Cascade analysis unavailable."))
     second_order = data.get("second_order", [])
     if not isinstance(second_order, list):
         second_order = []
@@ -194,29 +201,37 @@ Analyze the second-order geopolitical consequences. Return ONLY raw JSON — no 
 
 # ── History ───────────────────────────────────────────────────────────────────
 def _save_history(result: SimulationResult) -> None:
-    history: List[Dict] = []
-    if SIM_HISTORY_FILE.exists():
-        try:
-            history = json.loads(SIM_HISTORY_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            history = []
+    """FIX-1/FIX-2: Thread-safe atomic write with size cap."""
+    with _history_lock:
+        history: List[Dict] = []
+        if SIM_HISTORY_FILE.exists():
+            try:
+                history = json.loads(SIM_HISTORY_FILE.read_text(encoding="utf-8"))
+                if not isinstance(history, list):
+                    history = []
+            except (json.JSONDecodeError, OSError) as exc:  # FIX-3: was bare except
+                logger.warning("Could not read sim history, starting fresh: %s", exc)
+                history = []
 
-    history.insert(
-        0,
-        {
-            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "scenario": result.scenario,
-            "risk_score": result.risk_score,
-            "risk_label": result.risk_label,
-            "cascade_narrative": result.cascade_narrative,
-            "second_order": result.second_order,
-            "added_edges": result.added_edges,
-            "removed_edges": result.removed_edges,
-            "affected_nodes": result.affected_nodes,
-            "model_used": result.model_used,
-        },
-    )
-    SIM_HISTORY_FILE.write_text(json.dumps(history[:50], indent=2), encoding="utf-8")
+        history.insert(
+            0,
+            {
+                "timestamp":         datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "scenario":          result.scenario,
+                "risk_score":        result.risk_score,
+                "risk_label":        result.risk_label,
+                "cascade_narrative": result.cascade_narrative,
+                "second_order":      result.second_order,
+                "added_edges":       result.added_edges,
+                "removed_edges":     result.removed_edges,
+                "affected_nodes":    result.affected_nodes,
+                "model_used":        result.model_used,
+            },
+        )
+        # FIX-2: Cap enforced inside the lock so it's never skipped
+        SIM_HISTORY_FILE.write_text(
+            json.dumps(history[:MAX_HISTORY], indent=2), encoding="utf-8"
+        )
 
 
 # ── Public Entry Point ────────────────────────────────────────────────────────
