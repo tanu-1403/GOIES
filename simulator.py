@@ -51,23 +51,23 @@ class SimulationResult:
 
 
 # ── Ollama Helper ─────────────────────────────────────────────────────────────
-def _call_ollama(prompt: str, model: str) -> str:
-    import requests
+import requests as _requests  # hoisted — was imported per-call inside _call_ollama
 
+def _call_ollama(prompt: str, model: str) -> str:
     try:
-        resp = requests.post(
+        resp = _requests.post(
             f"{OLLAMA_BASE_URL}/api/generate",
             json={"model": model, "prompt": prompt, "stream": False},
             timeout=REQUEST_TIMEOUT_SECS,
         )
         resp.raise_for_status()
-    except requests.exceptions.ConnectionError:
+    except _requests.exceptions.ConnectionError:
         raise ConnectionError(
             f"Cannot reach Ollama at {OLLAMA_BASE_URL}. Run: ollama run {model}"
         )
-    except requests.exceptions.Timeout:
+    except _requests.exceptions.Timeout:
         raise TimeoutError(f"Ollama did not respond within {REQUEST_TIMEOUT_SECS}s.")
-    except requests.exceptions.HTTPError as e:
+    except _requests.exceptions.HTTPError as e:
         raise RuntimeError(f"Ollama HTTP error: {e}")
     return resp.json().get("response", "").strip()
 
@@ -97,11 +97,24 @@ def _risk_label_from_score(score: float) -> str:
 
 # ── Pass 1: Parse Scenario → Graph Mutations ──────────────────────────────────
 def _parse_scenario(scenario: str, graph: nx.DiGraph, model: str) -> Dict[str, Any]:
-    nodes_sample = list(graph.nodes)[:30]
-    edges_sample = [
-        f"{u} -[{d.get('label', '')}]-> {v}"
-        for u, v, d in list(graph.edges(data=True))[:25]
-    ]
+    # Select highest-degree nodes and their edges for richer, more relevant context
+    deg_sorted = sorted(graph.nodes(), key=lambda n: graph.degree(n), reverse=True)
+    nodes_sample = [str(n) for n in deg_sorted[:30]]
+    hub_nodes = set(deg_sorted[:10])
+    edges_sample = []
+    # Prioritise edges incident to hub nodes so the sample covers key relationships
+    for u, v, d in graph.edges(data=True):
+        if u in hub_nodes or v in hub_nodes:
+            edges_sample.append(f"{u} -[{d.get('label', '')}]-> {v}")
+        if len(edges_sample) >= 25:
+            break
+    if len(edges_sample) < 25:
+        for u, v, d in graph.edges(data=True):
+            entry = f"{u} -[{d.get('label', '')}]-> {v}"
+            if entry not in edges_sample:
+                edges_sample.append(entry)
+            if len(edges_sample) >= 25:
+                break
 
     prompt = f"""You are a strategic geopolitical policy analyst.
 
