@@ -202,7 +202,14 @@ def graph_health_score(graph: nx.DiGraph) -> Dict[str, Any]:
     group_diversity = len(set(groups)) / 7.0 if graph.number_of_nodes() > 0 else 0
 
     labels = [d.get("label", "") for _, _, d in graph.edges(data=True)]
-    label_diversity = min(1.0, len(set(labels)) / max(len(labels) * 0.3, 1))
+    # FIX-5: Exclude blank labels before scoring diversity.
+    # Previously len(set(labels)) counted "" as a unique label, giving score 1.0
+    # (perfect) for a fully-unlabelled graph — the opposite of the intended signal.
+    nonempty_labels = [l for l in labels if l.strip()]
+    if not nonempty_labels:
+        label_diversity = 0.0
+    else:
+        label_diversity = min(1.0, len(set(nonempty_labels)) / max(len(nonempty_labels) * 0.3, 1))
 
     avg_edges = graph.number_of_edges() / max(graph.number_of_nodes(), 1)
     edge_density_score = min(1.0, avg_edges / 3.0)
