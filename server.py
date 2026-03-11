@@ -161,7 +161,7 @@ def _check_rate(request: Request, max_req: int, window: float):
 
 
 # ── App ────────────────────────────────────────────────────────────────────────
-app = FastAPI(title="GOIES", version="4.1.0", docs_url="/api/docs")
+app = FastAPI(title="GOIES", version="4.2.0", docs_url="/api/docs", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -209,9 +209,12 @@ embedding_engine = GraphEmbeddingEngine()
 osint_engine     = OsintEngine()
 
 
-# FIX-11: Startup Ollama health check
-@app.on_event("startup")
-async def startup_checks():
+# FIX-11 / Issue-32: Startup checks via lifespan (on_event deprecated in FastAPI ≥ 0.93)
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def _lifespan(app):
+    # ── Startup ──────────────────────────────────────────────────────────────
     health = check_ollama_health()
     if health["online"]:
         logger.info("Ollama online at %s — models: %s", OLLAMA_BASE_URL, health["models"])
@@ -227,6 +230,13 @@ async def startup_checks():
         graph.number_of_nodes(),
         graph.number_of_edges(),
     )
+    yield
+    # ── Shutdown — flush a clean graph state ─────────────────────────────────
+    logger.info("Shutdown: flushing graph to disk…")
+    try:
+        save_graph(graph)
+    except Exception as exc:
+        logger.error("Shutdown graph save failed: %s", exc)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -316,7 +326,16 @@ def _update_graph(extractions) -> dict:
                 if not graph.has_node(canonical):
                     nodes_added += 1
                     new_ids.append(canonical)
-                graph.add_node(canonical, title=str(ext.attributes), group=cls, confidence=ext.confidence)
+                    graph.add_node(canonical, title=str(ext.attributes), group=cls, confidence=ext.confidence)
+                else:
+                    # Merge: keep whichever extraction has higher confidence;
+                    # always update group if it was previously "unknown"
+                    existing = graph.nodes[canonical]
+                    if existing.get("group", "unknown") == "unknown":
+                        existing["group"] = cls
+                    if ext.confidence > existing.get("confidence", 0.0):
+                        existing["title"] = str(ext.attributes)
+                        existing["confidence"] = ext.confidence
             elif cls == "relationship":
                 src_raw = ext.attributes.get("source", "")
                 tgt_raw = ext.attributes.get("target", "")
@@ -396,13 +415,34 @@ def health():
 
 
 # ── Ingest ─────────────────────────────────────────────────────────────────────
+def _validate_url(url: str) -> None:
+    """Issue-25: Block SSRF vectors — private IPs, loopback, and non-http(s) schemes."""
+    import ipaddress, urllib.parse
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(400, f"Unsupported URL scheme '{parsed.scheme}'. Only http/https allowed.")
+    host = parsed.hostname or ""
+    try:
+        addr = ipaddress.ip_address(host)
+        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+            raise HTTPException(400, "Requests to private/loopback IP addresses are not allowed.")
+    except ValueError:
+        pass  # hostname (not IP) — allow; DNS resolution is handled by the ingestor
+    blocked = ("localhost", "metadata.google.internal")
+    if any(host.lower() == b or host.lower().endswith("." + b) for b in blocked):
+        raise HTTPException(400, "Requests to reserved hostnames are not allowed.")
+
+
 @app.post("/api/ingest/url")
 def ingest_url(req: UrlIngestRequest, request: Request):
     _check_rate(request, max_req=30, window=60)
+    _validate_url(req.url)
     try:
         from ingestor import fetch_url_text
         text = fetch_url_text(req.url)
         return {"text": text, "chars": len(text)}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -410,6 +450,7 @@ def ingest_url(req: UrlIngestRequest, request: Request):
 @app.post("/api/extract/url")
 def extract_url_stream(req: ExtractUrlRequest, request: Request):
     _check_rate(request, max_req=10, window=60)
+    _validate_url(req.url)
 
     def event_generator():
         try:
@@ -647,7 +688,8 @@ Write the 3-paragraph intelligence summary now:
 
 
 @app.get("/api/path")
-def path(src: str, tgt: str):
+def path(src: str, tgt: str, request: Request):
+    _check_rate(request, max_req=30, window=60)  # Issue-27
     from graph_algo import find_shortest_path
     src_canon = resolve_node_name(graph, src)
     tgt_canon = resolve_node_name(graph, tgt)
@@ -660,7 +702,8 @@ def path(src: str, tgt: str):
 
 
 @app.post("/api/node/merge")
-def merge_node_ep(req: MergeRequest):
+def merge_node_ep(req: MergeRequest, request: Request):
+    _check_rate(request, max_req=20, window=60)  # Issue-27
     src_canon = resolve_node_name(graph, req.source)
     tgt_canon = resolve_node_name(graph, req.target)
     if src_canon == tgt_canon:
@@ -709,6 +752,10 @@ def extract_stream(req: ExtractRequest, request: Request):
     def event_generator():
         total_entities, total_relations = 0, 0
         new_nodes_all: List[str] = []
+        # Issue-16/17: Send only the delta vis payload during streaming
+        # (not the full graph every chunk) and skip expensive analytics
+        # mid-stream — analytics only sent on the final done event.
+        all_known_node_ids: set = {n for n in graph.nodes()}
         try:
             for chunk_data in extract_intelligence_stream(req.text, model=req.model, persona=req.persona):
                 extractions = chunk_data["extractions"]
@@ -717,22 +764,39 @@ def extract_stream(req: ExtractRequest, request: Request):
                 relations = len(extractions) - entities
                 total_entities  += entities
                 total_relations += relations
-                new_nodes_all.extend(diff["new_node_ids"])
+                new_node_ids = diff["new_node_ids"]
+                new_nodes_all.extend(new_node_ids)
+
+                # Only send vis data for newly added nodes + their immediate edges
+                new_vis: Optional[dict] = None
+                if new_node_ids:
+                    delta_nodes = [
+                        n for n in graph_to_vis(graph)["nodes"]
+                        if n["id"] in new_node_ids or n["id"] not in all_known_node_ids
+                    ]
+                    delta_edges = [
+                        e for e in graph_to_vis(graph)["edges"]
+                        if e["from"] in new_node_ids or e["to"] in new_node_ids
+                    ]
+                    all_known_node_ids.update(new_node_ids)
+                    new_vis = {"nodes": delta_nodes, "edges": delta_edges}
+
                 event_payload = {
                     "chunk":        chunk_data["chunk_index"],
                     "total_chunks": chunk_data["total_chunks"],
                     "extractions":  len(extractions),
                     "entities":     entities,
                     "relations":    relations,
-                    "new_node_ids": diff["new_node_ids"],
-                    "vis":          graph_to_vis(graph),
-                    "analytics":    get_graph_analytics(graph, watch_list_thresholds),
+                    "new_node_ids": new_node_ids,
                 }
+                if new_vis:
+                    event_payload["vis_delta"] = new_vis
                 if chunk_data.get("parse_error"):
                     event_payload["parse_error"] = chunk_data["parse_error"]
                 yield f"data: {json.dumps(event_payload)}\n\n"
 
-            yield f"data: {json.dumps({'done': True, 'totals': {'entities': total_entities, 'relations': total_relations, 'new_nodes': list(set(new_nodes_all))}})}\n\n"
+            # Full vis + analytics only on completion
+            yield f"data: {json.dumps({'done': True, 'totals': {'entities': total_entities, 'relations': total_relations, 'new_nodes': list(set(new_nodes_all))}, 'vis': graph_to_vis(graph), 'analytics': get_graph_analytics(graph, watch_list_thresholds)})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
@@ -821,14 +885,20 @@ def get_geo():
 
 # ── Simulation ─────────────────────────────────────────────────────────────────
 @app.post("/api/simulate")
-def simulate(req: SimulateRequest, request: Request):
+async def simulate(req: SimulateRequest, request: Request):
+    # Issue-24: made async + offloaded to thread executor.
+    # run_simulation makes two sequential blocking Ollama calls (up to ~4 min total);
+    # running them in a sync handler starves the Uvicorn worker thread pool.
     _check_rate(request, max_req=5, window=60)
     if not req.scenario.strip():
         raise HTTPException(400, "Scenario cannot be empty.")
     if len(graph.nodes) == 0:
         raise HTTPException(400, "Graph is empty. Ingest data first.")
     try:
-        result = run_simulation(req.scenario, graph, model=req.model)
+        import functools
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, functools.partial(run_simulation, req.scenario, graph, model=req.model)
+        )
     except ConnectionError as e:
         raise HTTPException(503, str(e))
     except TimeoutError as e:
@@ -1204,12 +1274,23 @@ async def continuous_start(req: ContinuousRequest, request: Request):
 @app.post("/api/osint/continuous/stop")
 async def continuous_stop():
     global _continuous_task
+    task_to_await = None
     async with _continuous_lock:
         if not _continuous_state["active"]:
             raise HTTPException(409, "Continuous loop is not running.")
         _continuous_state["active"] = False
         if _continuous_task and not _continuous_task.done():
             _continuous_task.cancel()
+            task_to_await = _continuous_task
+
+    # Issue-20: wait for the task to actually finish (with timeout) so the graph
+    # is not left in a partially-written state after the response is returned.
+    if task_to_await:
+        try:
+            await asyncio.wait_for(asyncio.shield(task_to_await), timeout=10.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass  # expected — task was cancelled or took > 10s to wind down
+
     logger.info("Continuous OSINT loop stop requested.")
     return {"status": "stopping", "cycles_completed": _continuous_state["cycle"]}
 
@@ -1236,7 +1317,8 @@ def continuous_status():
 
 
 @app.post("/api/osint/enrich/{node_id:path}")
-async def osint_enrich(node_id: str, model: str = "llama3.2"):
+async def osint_enrich(node_id: str, request: Request, model: str = "llama3.2"):
+    _check_rate(request, max_req=10, window=60)  # Issue-26: was unrate-limited
     canonical = resolve_node_name(graph, node_id)
     if canonical not in graph:
         raise HTTPException(404, f"Node '{node_id}' not found.")
