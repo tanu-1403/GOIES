@@ -331,7 +331,8 @@ async def add_security_headers(request: Request, call_next):
 
 
 if os.path.isdir("frontend"):
-    app.mount("/static", StaticFiles(directory="frontend"), name="frontend")
+    # html=True makes StaticFiles serve index.html for directory requests (e.g. GET /)
+    app.mount("/static", StaticFiles(directory="frontend", html=True), name="static")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -1495,12 +1496,22 @@ async def osint_gdelt(entity: str, days: int = 7):
 
 @app.get("/")
 def root():
-    return {
-        "name": "GOIES",
-        "version": "4.2.0",
-        "docs": "/api/docs",
-        "status": "running",
-    }
+    from fastapi.responses import FileResponse, RedirectResponse
+
+    index = pathlib.Path("frontend") / "index.html"
+    if index.exists():
+        return FileResponse(str(index))
+    return RedirectResponse(url="/api/docs")
+
+
+@app.get("/app.html")
+def app_dashboard():
+    from fastapi.responses import FileResponse, RedirectResponse
+
+    page = pathlib.Path("frontend") / "app.html"
+    if page.exists():
+        return FileResponse(str(page))
+    return RedirectResponse(url="/")
 
 
 if __name__ == "__main__":
