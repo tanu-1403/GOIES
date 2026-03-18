@@ -612,4 +612,4 @@ def check_ollama_health() -> dict:
 
 def list_available_models() -> list[str]:
     health = check_ollama_health()
-    return health["models"] if health["models"] else [DEFAULT_MODEL]
+    return health["models"] if health.get("online") else []

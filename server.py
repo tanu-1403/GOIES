@@ -1,1518 +1,2895 @@
-"""
-server.py  —  GOIES FastAPI Backend v4.2.0
-==========================================
-Merge resolution: HEAD (v4.x production) + ce28496 (async rewrite)
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>◈ GOIES — Intelligence Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700;900&family=Rajdhani:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/vis-network.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/dist/vis-network.min.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<style>
+/* ══════════════════════════════════════════════════════════
+   GOIES INTELLIGENCE DASHBOARD — FULL UI
+   Design: Dark military HUD · Cyber-tactical aesthetic
+   All hover/transition/animation effects fully wired
+══════════════════════════════════════════════════════════ */
 
-HEAD production features preserved:
-  FIX-1   eval() → ast.literal_eval()
-  FIX-2   _attrs dict embedded in graph_to_vis()
-  FIX-3   threading.Lock around _update_graph()
-  FIX-4   Path traversal in /api/snapshots/{id} blocked
-  FIX-5   CORS via ALLOWED_ORIGINS env var
-  FIX-6   print() → structured logger
-  FIX-8   XSS: LLM strings HTML-escaped in _fmt_tooltip()
-  FIX-9   Upload size cap (MAX_UPLOAD_BYTES)
-  FIX-10  watch_list_thresholds persisted to disk
-  FIX-11  Startup Ollama health check
-  FIX-12  Per-IP sliding-window rate limiter
-  FIX-13  Content-Security-Policy middleware
-  FIX-14  GQL path-find timeout
-  FIX-15  GQL LIMIT clause
-  FIX-17  Cross-session deduplication cache reset endpoint
-
-ce28496 async improvements layered in:
-  ASYNC-1  extract() and extract_stream() are now async (non-blocking Ollama calls)
-  ASYNC-2  OLLAMA_TIMEOUT env var honoured
-  ASYNC-3  CancelToken + DELETE /api/extract/{task_id} cancellation endpoint
-  ASYNC-4  DELETE /api/graph calls utils.clear_graph() — wipes backend state
-  ASYNC-5  Parallel chunk processing via asyncio.gather in extractor
-  ASYNC-7  SSE stream yields incremental per-chunk graph updates
-  ASYNC-8  warmup_model() called as background task at startup
-  ASYNC-9  Atomic graph save/load (handled in utils.py)
-"""
-
-from __future__ import annotations
-
-import ast
-import asyncio
-import html
-import io
-import json
-import logging
-import os
-import pathlib
-import re
-import threading
-import time
-import uuid
-from collections import defaultdict
-from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Dict, List, Optional
-
-import networkx as nx
-import uvicorn
-from fastapi import (
-    BackgroundTasks,
-    FastAPI,
-    File,
-    HTTPException,
-    Request,
-    Response,
-    UploadFile,
-)
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
-
-from embedding_engine import GraphEmbeddingEngine
-from extractor import (
-    CancelToken,
-    ChunkResult,
-    Entity,
-    Relationship,
-    _call_ollama,
-    check_ollama_health,
-    extract_stream,
-    extract_text,
-    list_available_models,
-    warmup_model,
-)
-from forecaster import run_forecast
-from geo import get_geo_data
-from osint_engine import OsintEngine
-from query_engine import GQLParser, run_gql
-from simulator import run_simulation
-
-import itertools
-import requests as http  # sync http — used in graph_summary, export_report
-
-from utils import (
-    export_csv,
-    export_graphml,
-    export_json,
-    get_ego_subgraph,
-    get_graph_analytics,
-    load_graph,
-    merge_nodes,
-    resolve_node_name,
-    retrieve_graph_context,
-    save_graph,
-)
-
-# ── Logging ───────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logger = logging.getLogger("goies.server")
-
-# ── Config ────────────────────────────────────────────────────────────────────
-OLLAMA_BASE_URL = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-DEFAULT_MODEL = os.getenv("GOIES_DEFAULT_MODEL", "llama3.2")
-MAX_INPUT_CHARS = int(os.getenv("MAX_INPUT_CHARS", "500000"))
-MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
-WATCH_THRESHOLDS_FILE = pathlib.Path("watch_thresholds.json")
-
-_raw_origins = os.getenv(
-    "ALLOWED_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000"
-)
-ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
-
-GROUP_COLORS: Dict[str, str] = {
-    "country": "#ff7b72",
-    "person": "#ffa657",
-    "organization": "#d2a8ff",
-    "technology": "#79c0ff",
-    "event": "#7ee787",
-    "treaty": "#f0e68c",
-    "resource": "#56d364",
-    "unknown": "#8b949e",
+/* ── CUSTOM PROPERTIES ──────────────────────────────────── */
+:root {
+  --bg-void:      #010408;
+  --bg-deep:      #030810;
+  --bg-base:      #060d1c;
+  --bg-panel:     #091422;
+  --bg-raised:    #0c1b30;
+  --bg-hover:     #0f2240;
+  --bg-active:    #132a50;
+  --border:       #132540;
+  --border-mid:   #1a3458;
+  --border-hi:    #254d80;
+  --accent:       #00d4ff;
+  --accent-dim:   #006e88;
+  --accent-glow:  rgba(0,212,255,0.18);
+  --accent-halo:  rgba(0,212,255,0.08);
+  --red:          #ff2244;
+  --red-dim:      #660018;
+  --red-glow:     rgba(255,34,68,0.2);
+  --amber:        #ffaa00;
+  --amber-dim:    #664400;
+  --green:        #00ff88;
+  --green-dim:    #00441f;
+  --green-glow:   rgba(0,255,136,0.15);
+  --purple:       #c084fc;
+  --purple-dim:   #4a1a88;
+  --text-hi:      #deeaf8;
+  --text-mid:     #8aaac4;
+  --text-lo:      #3e5a78;
+  --text-mute:    #1e3048;
+  --font-display: 'Orbitron', monospace;
+  --font-body:    'Rajdhani', sans-serif;
+  --font-mono:    'JetBrains Mono', monospace;
+  --radius:       3px;
+  --radius-lg:    6px;
+  --ease:         cubic-bezier(0.2, 0, 0.2, 1);
+  --t-fast:       120ms;
+  --t-mid:        220ms;
+  --t-slow:       400ms;
 }
 
-# ── In-flight extraction tasks (ASYNC-3) ──────────────────────────────────────
-_active_tasks: dict[str, CancelToken] = {}
-
-
-# ── Rate limiter ──────────────────────────────────────────────────────────────
-class _RateLimiter:
-    _PRUNE_INTERVAL = 300
-
-    def __init__(self):
-        self._windows: Dict[str, list] = defaultdict(list)
-        self._lock = threading.Lock()
-        self._last_prune = time.monotonic()
-
-    def is_allowed(self, key: str, max_requests: int, window_secs: float) -> bool:
-        now = time.monotonic()
-        with self._lock:
-            if now - self._last_prune > self._PRUNE_INTERVAL:
-                stale_cutoff = now - max(window_secs, 3600)
-                self._windows = defaultdict(
-                    list,
-                    {
-                        k: v
-                        for k, v in self._windows.items()
-                        if any(t > stale_cutoff for t in v)
-                    },
-                )
-                self._last_prune = now
-            timestamps = self._windows[key]
-            cutoff = now - window_secs
-            self._windows[key] = [t for t in timestamps if t > cutoff]
-            if len(self._windows[key]) >= max_requests:
-                return False
-            self._windows[key].append(now)
-            return True
-
-
-_rate_limiter = _RateLimiter()
-
-
-def _check_rate(request: Request, max_req: int, window: float):
-    client_ip = request.client.host if request.client else "unknown"
-    key = f"{client_ip}:{request.url.path}"
-    if not _rate_limiter.is_allowed(key, max_req, window):
-        raise HTTPException(
-            status_code=429,
-            detail=f"Rate limit exceeded. Max {max_req} requests per {int(window)}s.",
-            headers={"Retry-After": str(int(window))},
-        )
-
-
-# ── Shared state ──────────────────────────────────────────────────────────────
-graph: nx.DiGraph = load_graph()
-_graph_lock = threading.Lock()
-
-
-def _load_watch_thresholds() -> Dict[str, float]:
-    if WATCH_THRESHOLDS_FILE.exists():
-        try:
-            return json.loads(WATCH_THRESHOLDS_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {}
-
-
-watch_list_thresholds: Dict[str, float] = _load_watch_thresholds()
-
-embedding_engine = GraphEmbeddingEngine()
-osint_engine = OsintEngine()
-
-# ── Continuous OSINT loop state ───────────────────────────────────────────────
-_continuous_state: dict = {
-    "active": False,
-    "cycle": 0,
-    "started_at": None,
-    "stopped_at": None,
-    "interval_secs": 300,
-    "articles_per_feed": 5,
-    "model": DEFAULT_MODEL,
-    "query_log": [],
-    "cycle_log": [],
-    "total_entities": 0,
-    "total_relations": 0,
-    "total_articles": 0,
+/* ── RESET ─────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  height: 100%; overflow: hidden;
+  background: var(--bg-void);
+  color: var(--text-hi);
+  font-family: var(--font-body);
+  font-size: 14px;
 }
-_continuous_task: Optional[asyncio.Task] = None
-_continuous_lock = asyncio.Lock()
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--bg-deep); }
+::-webkit-scrollbar-thumb { background: var(--border-mid); border-radius: 2px; transition: background var(--t-fast); }
+::-webkit-scrollbar-thumb:hover { background: var(--accent-dim); }
 
+/* ── LAYOUT ─────────────────────────────────────────────── */
+#app { display: flex; flex-direction: column; height: 100vh; }
 
-async def _continuous_loop() -> None:
-    while _continuous_state["active"]:
-        try:
-            await asyncio.sleep(_continuous_state["interval_secs"])
-            if not _continuous_state["active"]:
-                break
-            feeds = osint_engine.get_feeds()
-            n = _continuous_state["articles_per_feed"]
-            model = _continuous_state["model"]
-            for feed_url in feeds:
-                articles = await asyncio.to_thread(
-                    osint_engine.fetch_feed_articles, feed_url, n
-                )
-                for text in articles:
-                    if not text:
-                        continue
-                    cancel = CancelToken()
-                    ents, rels = await extract_text(
-                        text,
-                        model=model,
-                        cancel=cancel,
-                        on_chunk=lambda r: _apply_chunk(r),
-                    )
-                    _continuous_state["total_entities"] += len(ents)
-                    _continuous_state["total_relations"] += len(rels)
-                    _continuous_state["total_articles"] += 1
-            _continuous_state["cycle"] += 1
-            _continuous_state["cycle_log"].insert(
-                0,
-                {
-                    "cycle": _continuous_state["cycle"],
-                    "at": datetime.now(timezone.utc).isoformat(),
-                },
-            )
-            _continuous_state["cycle_log"] = _continuous_state["cycle_log"][:20]
-        except asyncio.CancelledError:
-            break
-        except Exception as exc:
-            logger.warning("Continuous OSINT loop error: %s", exc)
+/* ── HEADER ─────────────────────────────────────────────── */
+#header {
+  display: flex; align-items: center; gap: 14px;
+  padding: 0 16px;
+  height: 50px;
+  background: var(--bg-deep);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  position: relative; overflow: hidden; z-index: 200;
+}
+/* scanline texture */
+#header::before {
+  content: '';
+  position: absolute; inset: 0;
+  background: repeating-linear-gradient(0deg,
+    transparent, transparent 2px,
+    rgba(0,212,255,0.015) 2px, rgba(0,212,255,0.015) 4px);
+  pointer-events: none;
+}
+/* sweep line across header */
+#header::after {
+  content: '';
+  position: absolute; top: 0; left: -60%; width: 40%; height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(0,212,255,0.04), transparent);
+  animation: header-sweep 8s linear infinite;
+  pointer-events: none;
+}
+@keyframes header-sweep { 0%{left:-40%} 100%{left:120%} }
 
-    _continuous_state["stopped_at"] = datetime.now(timezone.utc).isoformat()
+.home-link {
+  font-family: var(--font-mono); font-size: 9px; letter-spacing: 1.5px;
+  color: var(--text-lo); text-decoration: none;
+  display: flex; align-items: center; gap: 5px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: color var(--t-mid) var(--ease),
+              border-color var(--t-mid) var(--ease),
+              background var(--t-mid) var(--ease),
+              box-shadow var(--t-mid) var(--ease);
+  white-space: nowrap; position: relative; z-index: 1;
+}
+.home-link:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-halo);
+  box-shadow: 0 0 12px var(--accent-glow);
+}
+.header-divider { width: 1px; height: 22px; background: var(--border); flex-shrink: 0; }
 
+.logo {
+  font-family: var(--font-display);
+  font-size: 16px; font-weight: 900;
+  color: var(--accent); letter-spacing: 4px;
+  text-shadow: 0 0 28px var(--accent-glow);
+  white-space: nowrap; position: relative; z-index: 1;
+}
+.logo span {
+  color: var(--text-lo); font-weight: 400;
+  font-size: 9px; letter-spacing: 2.5px;
+  display: block; margin-top: -2px;
+}
 
-# ── Lifespan ──────────────────────────────────────────────────────────────────
-@asynccontextmanager
-async def _lifespan(app: FastAPI):
-    # Startup
-    health = check_ollama_health()
-    if health["online"]:
-        logger.info(
-            "Ollama online at %s — models: %s", OLLAMA_BASE_URL, health["models"]
-        )
-    else:
-        logger.warning(
-            "Ollama NOT reachable at %s — extraction will fail until started. %s",
-            OLLAMA_BASE_URL,
-            health["error"],
-        )
-    logger.info(
-        "Graph loaded: %d nodes, %d edges",
-        graph.number_of_nodes(),
-        graph.number_of_edges(),
-    )
+/* ── HEADER STATS ─────────────────────────────────────── */
+#header-stats { display: flex; gap: 8px; align-items: center; margin-left: 6px; }
 
-    # ASYNC-8: warm up model as background task
-    asyncio.create_task(warmup_model(DEFAULT_MODEL))
+.hstat {
+  display: flex; align-items: center; gap: 6px;
+  font-family: var(--font-mono); font-size: 10px;
+  color: var(--text-mid);
+  padding: 4px 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: border-color var(--t-mid) var(--ease),
+              background var(--t-mid) var(--ease);
+  cursor: default;
+}
+.hstat:hover { border-color: var(--border-hi); background: var(--bg-raised); }
+.hstat .val { color: var(--accent); font-weight: 700; font-variant-numeric: tabular-nums; }
+.hstat .lbl { color: var(--text-lo); }
 
-    yield
+/* ── OLLAMA INDICATOR ─────────────────────────────────── */
+#ollama-indicator {
+  display: flex; align-items: center; gap: 7px;
+  font-family: var(--font-mono); font-size: 10px;
+  padding: 4px 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: border-color var(--t-slow) var(--ease),
+              background var(--t-slow) var(--ease),
+              box-shadow var(--t-slow) var(--ease);
+  cursor: default; position: relative;
+}
+#ollama-indicator.is-online {
+  border-color: rgba(0,255,136,0.3);
+  background: rgba(0,255,136,0.05);
+}
+#ollama-indicator.is-offline {
+  border-color: rgba(255,34,68,0.35);
+  background: rgba(255,34,68,0.05);
+}
 
-    # Shutdown
-    logger.info("Shutdown: flushing graph to disk…")
-    try:
-        save_graph(graph)
-    except Exception as exc:
-        logger.error("Shutdown graph save failed: %s", exc)
+.pulse-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  background: var(--green);
+  box-shadow: 0 0 8px var(--green);
+  animation: dot-pulse 2s ease-in-out infinite;
+}
+.pulse-dot.offline  {
+  background: var(--red);
+  box-shadow: 0 0 8px var(--red);
+  animation: dot-blink 1s step-end infinite;
+}
+.pulse-dot.checking {
+  background: var(--amber);
+  box-shadow: 0 0 8px var(--amber);
+  animation: dot-pulse 0.7s ease-in-out infinite;
+}
+@keyframes dot-pulse  { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(.75)} }
+@keyframes dot-blink  { 0%,100%{opacity:1} 50%{opacity:0} }
 
+/* ── RISK BADGE ──────────────────────────────────────── */
+#risk-badge {
+  font-family: var(--font-display); font-size: 9px; font-weight: 700;
+  padding: 4px 10px; border-radius: var(--radius);
+  letter-spacing: 1.5px;
+  transition: all var(--t-slow) var(--ease);
+}
+.risk-LOW     { background: var(--green-dim);  color: var(--green);  border: 1px solid rgba(0,255,136,0.4); }
+.risk-MEDIUM  { background: var(--amber-dim);  color: var(--amber);  border: 1px solid rgba(255,170,0,0.4); }
+.risk-HIGH    { background: var(--red-dim);    color: var(--red);    border: 1px solid rgba(255,34,68,0.4); }
+.risk-CRITICAL {
+  background: var(--red); color: var(--bg-void);
+  border: 1px solid var(--red);
+  box-shadow: 0 0 16px var(--red-glow);
+  animation: critical-flash 0.8s ease-in-out infinite alternate;
+}
+@keyframes critical-flash { from{box-shadow:0 0 6px var(--red)} to{box-shadow:0 0 22px var(--red)} }
+@keyframes redpulse { 0%,100%{box-shadow:0 0 6px var(--red)} 50%{box-shadow:0 0 18px var(--red)} }
 
-# ── App ───────────────────────────────────────────────────────────────────────
-app = FastAPI(
-    title="GOIES",
-    version="4.2.0",
-    docs_url="/api/docs",
-    lifespan=_lifespan,
-)
+.header-spacer { flex: 1; }
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["Content-Type"],
-)
+#model-select {
+  font-family: var(--font-mono); font-size: 10px;
+  background: var(--bg-panel); color: var(--text-mid);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 4px 8px; cursor: pointer;
+  transition: border-color var(--t-mid) var(--ease),
+              color var(--t-mid) var(--ease);
+}
+#model-select:hover { border-color: var(--border-hi); color: var(--text-hi); }
+#model-select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-halo); }
 
+/* ── NAV TABS ──────────────────────────────────────────── */
+#nav {
+  display: flex; align-items: center;
+  background: var(--bg-deep);
+  border-bottom: 1px solid var(--border);
+  padding: 0 10px; gap: 0; flex-shrink: 0; overflow-x: auto;
+}
+#nav::-webkit-scrollbar { height: 0; }
 
-@app.middleware("http")
-async def add_security_headers(request: Request, call_next):
-    response = await call_next(request)
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://unpkg.com; "
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com "
-        "https://cdnjs.cloudflare.com https://unpkg.com; "
-        "font-src 'self' https://fonts.gstatic.com; "
-        "img-src 'self' data: https://*.tile.openstreetmap.org; "
-        "connect-src 'self'; frame-ancestors 'none';"
-    )
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    return response
+.nav-tab {
+  font-family: var(--font-display); font-size: 9.5px; font-weight: 600;
+  letter-spacing: 1.5px; color: var(--text-lo);
+  padding: 11px 14px; border: none; background: none;
+  cursor: pointer; white-space: nowrap;
+  border-bottom: 2px solid transparent;
+  transition: color var(--t-mid) var(--ease),
+              border-color var(--t-mid) var(--ease),
+              background var(--t-mid) var(--ease);
+  display: flex; align-items: center; gap: 6px;
+  position: relative;
+}
+/* hover shimmer */
+.nav-tab::before {
+  content: '';
+  position: absolute; inset: 0;
+  background: linear-gradient(180deg, transparent 60%, var(--accent-halo));
+  opacity: 0;
+  transition: opacity var(--t-mid) var(--ease);
+}
+.nav-tab:hover { color: var(--text-mid); }
+.nav-tab:hover::before { opacity: 1; }
+.nav-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.nav-tab.active::before { opacity: 1; }
 
+.nav-tab .badge {
+  background: var(--red); color: #fff;
+  font-size: 8px; padding: 1px 5px;
+  border-radius: 8px; font-family: var(--font-mono);
+  display: none;
+}
+.nav-tab .badge.visible { display: inline; }
 
-if os.path.isdir("frontend"):
-    # html=True makes StaticFiles serve index.html for directory requests (e.g. GET /)
-    app.mount("/static", StaticFiles(directory="frontend", html=True), name="static")
+/* ── MAIN ────────────────────────────────────────────── */
+#main { flex: 1; overflow: hidden; position: relative; }
+.panel { display: none; height: 100%; overflow: hidden; }
+.panel.active { display: flex; animation: panel-in var(--t-mid) var(--ease); }
+@keyframes panel-in { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:none} }
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+/* ── PANEL UTILS ─────────────────────────────────────── */
+.panel-col { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+.panel-scroll { flex: 1; overflow-y: auto; padding: 16px; }
 
+.section-title {
+  font-family: var(--font-display); font-size: 9.5px; font-weight: 700;
+  letter-spacing: 2.5px; color: var(--accent);
+  padding-bottom: 8px; margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px;
+}
+.section-title::before {
+  content: '';
+  display: inline-block; width: 3px; height: 10px;
+  background: var(--accent);
+  border-radius: 1px;
+  box-shadow: 0 0 6px var(--accent);
+}
 
-def _fmt_tooltip(group: str, attributes: dict, confidence: float) -> str:
-    color = GROUP_COLORS.get(group, "#8b949e")
-    lines = [
-        f'<b style="color:{color};font-family:monospace">{html.escape(group.upper())}</b>'
-    ]
-    for k, v in attributes.items():
-        lines.append(
-            f'<span style="color:#64748b">{html.escape(str(k))}:</span> {html.escape(str(v))}'
-        )
-    lines.append(f'<span style="color:#64748b">confidence:</span> {confidence:.2f}')
-    return "<br>".join(lines)
+.card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 14px; margin-bottom: 12px;
+  transition: border-color var(--t-mid) var(--ease),
+              background var(--t-mid) var(--ease),
+              box-shadow var(--t-mid) var(--ease);
+  position: relative; overflow: hidden;
+}
+.card::before {
+  content: '';
+  position: absolute; top: 0; left: 0; right: 0; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent-dim), transparent);
+  opacity: 0;
+  transition: opacity var(--t-mid) var(--ease);
+}
+.card:hover {
+  border-color: var(--border-hi);
+  background: var(--bg-raised);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.3), inset 0 0 30px var(--accent-halo);
+}
+.card:hover::before { opacity: 1; }
 
+/* ── BUTTONS ─────────────────────────────────────────── */
+.btn {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-family: var(--font-display); font-size: 9.5px; font-weight: 700;
+  letter-spacing: 1.5px; padding: 9px 18px;
+  border-radius: var(--radius); cursor: pointer;
+  border: 1px solid;
+  transition: background var(--t-mid) var(--ease),
+              color var(--t-mid) var(--ease),
+              border-color var(--t-mid) var(--ease),
+              box-shadow var(--t-mid) var(--ease),
+              transform var(--t-fast) var(--ease);
+  position: relative; overflow: hidden;
+}
+/* shimmer sweep on hover */
+.btn::after {
+  content: '';
+  position: absolute; top: -50%; left: -75%;
+  width: 50%; height: 200%;
+  background: linear-gradient(105deg, transparent, rgba(255,255,255,0.12), transparent);
+  transform: skewX(-15deg);
+  transition: left var(--t-slow) var(--ease);
+}
+.btn:hover::after { left: 130%; }
+.btn:active { transform: translateY(1px); }
 
-def _safe_parse_attrs(raw: Any) -> dict:
-    if isinstance(raw, dict):
-        return raw
-    if not isinstance(raw, str):
-        return {}
-    try:
-        result = ast.literal_eval(raw)
-        return result if isinstance(result, dict) else {}
-    except (ValueError, SyntaxError, TypeError):
-        return {}
+.btn-primary {
+  background: var(--accent); color: var(--bg-void);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 rgba(0,212,255,0);
+}
+.btn-primary:hover {
+  background: #00eeff;
+  box-shadow: 0 0 24px var(--accent-glow), 0 4px 12px rgba(0,0,0,0.3);
+  transform: translateY(-1px);
+}
+.btn-primary:active { transform: translateY(1px); box-shadow: none; }
 
+.btn-ghost {
+  background: transparent; color: var(--accent); border-color: var(--accent-dim);
+}
+.btn-ghost:hover {
+  background: var(--accent-halo);
+  border-color: var(--accent);
+  box-shadow: 0 0 14px var(--accent-glow);
+  color: var(--accent);
+}
 
-def graph_to_vis(g: nx.DiGraph) -> dict:
-    nodes = []
-    for node_id, data in g.nodes(data=True):
-        group = data.get("group", "unknown")
-        color = GROUP_COLORS.get(group, "#8b949e")
-        conf = data.get("confidence", 1.0)
-        attrs = _safe_parse_attrs(data.get("title", "{}"))
-        nodes.append(
-            {
-                "id": node_id,
-                "label": node_id,
-                "group": group,
-                "color": {
-                    "background": color,
-                    "border": color,
-                    "highlight": {"background": "#ffffff", "border": color},
-                    "hover": {"background": color, "border": "#ffffff"},
-                },
-                "title": _fmt_tooltip(group, attrs, conf),
-                "_attrs": attrs,
-                "confidence": conf,
-                "size": 16,
-                "borderWidth": 2,
-                "font": {"color": "#e2e8f0", "size": 13},
-                "shadow": {
-                    "enabled": True,
-                    "color": color + "44",
-                    "size": 12,
-                    "x": 0,
-                    "y": 0,
-                },
+.btn-danger {
+  background: transparent; color: var(--red); border-color: var(--red-dim);
+}
+.btn-danger:hover {
+  background: var(--red-glow);
+  border-color: var(--red);
+  box-shadow: 0 0 14px var(--red-glow);
+}
+
+.btn-sm { padding: 5px 12px; font-size: 9px; }
+.btn:disabled { opacity: .35; cursor: not-allowed; pointer-events: none; }
+.btn-loader { display: none; }
+.btn.loading .btn-loader { display: inline; animation: spin .7s linear infinite; }
+.btn.loading .btn-text { opacity: .5; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── INPUTS ──────────────────────────────────────────── */
+.input-group { margin-bottom: 12px; }
+.input-label {
+  display: block; font-family: var(--font-mono); font-size: 9px;
+  color: var(--text-lo); letter-spacing: 1.5px; margin-bottom: 5px;
+  text-transform: uppercase;
+}
+textarea, input[type=text], input[type=url], select {
+  width: 100%;
+  background: var(--bg-raised);
+  color: var(--text-hi);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  font-family: var(--font-body); font-size: 13px;
+  transition: border-color var(--t-mid) var(--ease),
+              box-shadow var(--t-mid) var(--ease),
+              background var(--t-mid) var(--ease);
+  outline: none; resize: vertical;
+}
+textarea:hover, input:hover, select:hover {
+  border-color: var(--border-hi);
+  background: var(--bg-hover);
+}
+textarea:focus, input:focus, select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-halo), 0 0 12px rgba(0,212,255,0.1);
+  background: var(--bg-hover);
+}
+select { cursor: pointer; }
+.row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+
+/* ── EXTRACTION LOG ──────────────────────────────────── */
+#extract-log {
+  background: var(--bg-void);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-family: var(--font-mono); font-size: 11px;
+  min-height: 160px; max-height: 280px;
+  overflow-y: auto; color: var(--text-mid);
+}
+.log-line { padding: 2px 0; animation: fadein .25s var(--ease); }
+.log-line.entity   { color: var(--accent); }
+.log-line.relation { color: var(--purple); }
+.log-line.chunk    { color: var(--amber); font-weight: 700; }
+.log-line.ok       { color: var(--green); }
+.log-line.err      { color: var(--red); }
+@keyframes fadein { from{opacity:0;transform:translateY(3px)} to{opacity:1;transform:none} }
+
+/* ── INGEST MODE TABS ─────────────────────────────────── */
+.ingest-mode-tabs { display: flex; gap: 6px; margin-bottom: 16px; }
+.ingest-mode {
+  font-family: var(--font-mono); font-size: 9px; letter-spacing: 1.5px;
+  padding: 5px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-lo); cursor: pointer;
+  background: transparent;
+  transition: color var(--t-mid) var(--ease),
+              border-color var(--t-mid) var(--ease),
+              background var(--t-mid) var(--ease),
+              box-shadow var(--t-mid) var(--ease);
+  text-transform: uppercase;
+}
+.ingest-mode:hover {
+  color: var(--text-mid);
+  border-color: var(--border-hi);
+}
+.ingest-mode.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-halo);
+  box-shadow: 0 0 10px var(--accent-glow);
+}
+.ingest-pane { display: none; }
+.ingest-pane.active { display: block; animation: fadein .2s var(--ease); }
+
+/* ── GRAPH PANEL ─────────────────────────────────────── */
+#graph-canvas-wrap {
+  flex: 1; position: relative;
+  background: var(--bg-void);
+  border-right: 1px solid var(--border);
+}
+#graph-canvas { width: 100%; height: 100%; }
+#graph-sidebar {
+  width: 264px; display: flex; flex-direction: column;
+  background: var(--bg-deep); overflow: hidden;
+}
+#graph-controls { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.node-search { width: 100%; margin-bottom: 8px; font-size: 12px; padding: 6px 10px; }
+.filter-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+.chip {
+  font-family: var(--font-mono); font-size: 9px; padding: 3px 9px;
+  border-radius: 10px; border: 1px solid; cursor: pointer;
+  transition: opacity var(--t-mid) var(--ease),
+              transform var(--t-fast) var(--ease),
+              box-shadow var(--t-mid) var(--ease);
+}
+.chip:hover { transform: scale(1.05); }
+.chip.inactive { opacity: .28; }
+.chip.inactive:hover { opacity: .55; }
+
+#node-inspector { flex: 1; overflow-y: auto; padding: 14px; }
+.inspector-empty {
+  color: var(--text-lo); font-family: var(--font-mono);
+  font-size: 11px; text-align: center; padding: 30px 0;
+  line-height: 2;
+}
+.node-name {
+  font-family: var(--font-display); font-size: 13px; font-weight: 700;
+  color: var(--accent); margin-bottom: 4px;
+}
+.node-group-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-family: var(--font-mono); font-size: 9px;
+  padding: 2px 9px; border-radius: 10px; margin-bottom: 10px;
+}
+.attr-row {
+  display: flex; justify-content: space-between; padding: 5px 0;
+  border-bottom: 1px solid var(--border); font-size: 12px;
+  transition: background var(--t-fast) var(--ease);
+  border-radius: 2px; padding-left: 4px;
+}
+.attr-row:hover { background: var(--bg-raised); }
+.attr-key { color: var(--text-lo); font-family: var(--font-mono); font-size: 9px; }
+.attr-val { color: var(--text-mid); }
+.rel-item {
+  padding: 5px 4px; border-bottom: 1px solid var(--border);
+  font-size: 11px; color: var(--text-mid);
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+  border-radius: 2px; cursor: default;
+}
+.rel-item:hover { background: var(--bg-raised); color: var(--text-hi); }
+.rel-item .arrow { color: var(--accent-dim); margin: 0 4px; }
+.rel-item .label { color: var(--text-lo); font-style: italic; font-size: 10px; }
+
+#path-bar {
+  padding: 10px 14px; border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+#path-result {
+  margin-top: 8px; font-family: var(--font-mono);
+  font-size: 11px; color: var(--accent); word-break: break-all;
+}
+
+/* ── GEO PANEL ───────────────────────────────────────── */
+#geo-controls {
+  position: absolute; top: 10px; right: 10px; z-index: 1000;
+  display: flex; gap: 8px; align-items: center;
+}
+#map { width: 100%; height: 100%; }
+#tension-legend {
+  position: absolute; bottom: 24px; left: 16px; z-index: 1000;
+  background: rgba(3,8,16,0.92); backdrop-filter: blur(8px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: 12px 16px;
+  font-family: var(--font-mono); font-size: 11px;
+}
+.legend-title { color: var(--accent); letter-spacing: 2px; margin-bottom: 8px; font-weight: 700; font-size: 9px; }
+.legend-row {
+  display: flex; align-items: center; gap: 8px; padding: 3px 0;
+  color: var(--text-mid);
+  transition: color var(--t-fast) var(--ease);
+}
+.legend-row:hover { color: var(--text-hi); }
+.legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+/* ── SIMULATE PANEL ──────────────────────────────────── */
+#sim-left {
+  width: 360px; border-right: 1px solid var(--border);
+  padding: 16px; background: var(--bg-deep); overflow-y: auto;
+}
+#sim-right { flex: 1; overflow-y: auto; padding: 16px; }
+.risk-gauge { display: flex; flex-direction: column; align-items: center; margin-bottom: 20px; }
+.gauge-ring {
+  width: 104px; height: 104px; border-radius: 50%;
+  border: 2px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+  flex-direction: column; margin-bottom: 10px;
+  transition: border-color var(--t-slow) var(--ease),
+              box-shadow var(--t-slow) var(--ease),
+              color var(--t-slow) var(--ease);
+}
+.gauge-ring span { font-family: var(--font-display); font-size: 30px; font-weight: 900; }
+.gauge-label { font-family: var(--font-display); font-size: 10px; letter-spacing: 2px; }
+.cascade-text { font-size: 14px; color: var(--text-mid); line-height: 1.6; }
+.second-order-item {
+  padding: 6px 0; border-bottom: 1px solid var(--border);
+  font-size: 12px; color: var(--text-mid);
+  transition: color var(--t-fast) var(--ease), padding-left var(--t-fast) var(--ease);
+}
+.second-order-item:hover { color: var(--text-hi); padding-left: 4px; }
+.second-order-item::before { content: '▸ '; color: var(--accent-dim); }
+.affected-nodes { display: flex; flex-wrap: wrap; gap: 6px; }
+.anode {
+  font-family: var(--font-mono); font-size: 10px; padding: 3px 10px;
+  border: 1px solid var(--border-mid);
+  border-radius: 12px;
+  background: var(--bg-raised); color: var(--text-mid);
+  transition: border-color var(--t-mid) var(--ease),
+              color var(--t-mid) var(--ease),
+              background var(--t-mid) var(--ease);
+  cursor: default;
+}
+.anode:hover { border-color: var(--accent-dim); color: var(--accent); background: var(--bg-hover); }
+
+.sim-history-item {
+  padding: 10px 12px; border: 1px solid var(--border);
+  border-radius: var(--radius); margin-bottom: 6px;
+  cursor: pointer;
+  transition: border-color var(--t-mid) var(--ease),
+              background var(--t-mid) var(--ease),
+              box-shadow var(--t-mid) var(--ease),
+              transform var(--t-fast) var(--ease);
+}
+.sim-history-item:hover {
+  border-color: var(--accent-dim);
+  background: var(--bg-hover);
+  box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+  transform: translateX(2px);
+}
+.scenario-text { font-size: 12px; color: var(--text-mid); margin-bottom: 4px; }
+.sim-meta { display: flex; gap: 8px; align-items: center; }
+.risk-pill {
+  font-family: var(--font-mono); font-size: 9px;
+  padding: 2px 7px; border-radius: 8px;
+}
+
+/* ── FORECAST PANEL ──────────────────────────────────── */
+#forecast-left {
+  width: 320px; border-right: 1px solid var(--border);
+  padding: 16px; background: var(--bg-deep); overflow-y: auto;
+}
+#forecast-right { flex: 1; overflow-y: auto; padding: 16px; }
+.global-risk-display {
+  background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: 16px; margin-bottom: 14px;
+}
+.global-risk-score { font-family: var(--font-display); font-size: 42px; font-weight: 900; }
+.global-risk-label { font-family: var(--font-display); font-size: 10px; letter-spacing: 2px; margin-bottom: 8px; }
+.hotspot-list { display: flex; flex-wrap: wrap; gap: 5px; }
+.hotspot-badge {
+  font-family: var(--font-mono); font-size: 9px; padding: 2px 8px;
+  border-radius: 8px; background: var(--red-dim); color: var(--red);
+  border: 1px solid rgba(255,34,68,0.3);
+  transition: background var(--t-mid) var(--ease),
+              box-shadow var(--t-mid) var(--ease);
+  cursor: default;
+}
+.hotspot-badge:hover { background: rgba(255,34,68,0.2); box-shadow: 0 0 8px var(--red-glow); }
+
+.forecast-card {
+  background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: 16px; margin-bottom: 12px;
+  transition: border-color var(--t-mid) var(--ease),
+              background var(--t-mid) var(--ease),
+              box-shadow var(--t-mid) var(--ease),
+              transform var(--t-mid) var(--ease);
+  position: relative; overflow: hidden;
+}
+.forecast-card::before {
+  content: '';
+  position: absolute; top: 0; left: 0; right: 0; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent-dim), transparent);
+  opacity: 0; transition: opacity var(--t-mid) var(--ease);
+}
+.forecast-card:hover {
+  border-color: var(--border-hi);
+  background: var(--bg-raised);
+  box-shadow: 0 4px 24px rgba(0,0,0,0.35);
+  transform: translateY(-1px);
+}
+.forecast-card:hover::before { opacity: 1; }
+.forecast-card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.forecast-rank { font-family: var(--font-mono); font-size: 9px; color: var(--text-lo); }
+.forecast-title { font-family: var(--font-display); font-size: 12px; font-weight: 700; color: var(--text-hi); margin-bottom: 10px; }
+.forecast-meta { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; }
+.fmeta { font-family: var(--font-mono); font-size: 9px; color: var(--text-lo); }
+.prob-bar { height: 3px; background: var(--bg-raised); border-radius: 2px; margin-bottom: 10px; overflow: hidden; }
+.prob-fill { height: 100%; border-radius: 2px; transition: width 1s var(--ease); }
+.forecast-signal { font-family: var(--font-mono); font-size: 10px; color: var(--accent-dim); margin-bottom: 8px; }
+.forecast-narrative { font-size: 13px; color: var(--text-mid); line-height: 1.5; margin-bottom: 8px; }
+.forecast-mitigation { font-size: 11px; color: var(--text-lo); font-style: italic; }
+
+/* ── QUERY PANEL ─────────────────────────────────────── */
+#chat-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+#chat-history { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+#chat-input-row {
+  display: flex; gap: 8px; padding: 12px 16px;
+  border-top: 1px solid var(--border); background: var(--bg-deep);
+}
+#chat-input { resize: none; flex: 1; padding: 8px 12px; font-size: 13px; min-height: 52px; }
+.chat-msg { display: flex; flex-direction: column; max-width: 85%; }
+.chat-msg.user { align-self: flex-end; align-items: flex-end; }
+.chat-msg.assistant { align-self: flex-start; }
+.chat-bubble {
+  padding: 10px 14px; border-radius: var(--radius-lg);
+  font-size: 13px; line-height: 1.55;
+  animation: fadein .3s var(--ease);
+}
+.chat-msg.user .chat-bubble { background: var(--accent); color: var(--bg-void); }
+.chat-msg.assistant .chat-bubble {
+  background: var(--bg-panel); color: var(--text-mid);
+  border: 1px solid var(--border);
+}
+.chat-time { font-family: var(--font-mono); font-size: 9px; color: var(--text-lo); margin-top: 3px; }
+.thinking-dots::after { content: '...'; animation: thinking 1s steps(4) infinite; }
+@keyframes thinking { 0%{content:'.'} 33%{content:'..'} 66%{content:'...'} 100%{content:''} }
+#chat-context-sidebar {
+  width: 280px; border-left: 1px solid var(--border);
+  overflow-y: auto; padding: 16px; background: var(--bg-deep);
+}
+#chat-context-text { font-family: var(--font-mono); font-size: 11px; color: var(--text-lo); line-height: 1.7; }
+
+/* ── ANALYTICS PANEL ─────────────────────────────────── */
+#analytics-panel { overflow-y: auto; padding: 16px; flex-wrap: wrap; align-content: flex-start; gap: 12px; }
+.stat-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; width: 100%; }
+.stat-card {
+  background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: 16px; text-align: center;
+  transition: border-color var(--t-mid) var(--ease),
+              background var(--t-mid) var(--ease),
+              box-shadow var(--t-mid) var(--ease),
+              transform var(--t-mid) var(--ease);
+  cursor: default;
+  position: relative; overflow: hidden;
+}
+.stat-card::after {
+  content: '';
+  position: absolute; bottom: 0; left: 0; right: 0; height: 2px;
+  background: var(--accent);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform var(--t-mid) var(--ease);
+}
+.stat-card:hover {
+  border-color: var(--border-hi);
+  background: var(--bg-raised);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+  transform: translateY(-2px);
+}
+.stat-card:hover::after { transform: scaleX(1); }
+.stat-val { font-family: var(--font-display); font-size: 28px; font-weight: 900; color: var(--accent); }
+.stat-name { font-family: var(--font-mono); font-size: 9px; color: var(--text-lo); letter-spacing: 1px; margin-top: 4px; }
+
+.health-ring {
+  display: flex; align-items: center; gap: 20px; padding: 16px;
+  background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  transition: border-color var(--t-mid) var(--ease),
+              background var(--t-mid) var(--ease);
+}
+.health-ring:hover { border-color: var(--border-hi); background: var(--bg-raised); }
+.health-circle {
+  width: 80px; height: 80px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-display); font-size: 22px; font-weight: 900;
+  color: var(--accent); border: 3px solid var(--bg-raised);
+  background: conic-gradient(var(--accent) 0deg, var(--bg-raised) 0deg);
+  transition: box-shadow var(--t-slow) var(--ease);
+}
+.health-circle:hover { box-shadow: 0 0 20px var(--accent-glow); }
+.analytics-charts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; width: 100%; }
+.chart-card {
+  background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: 16px; max-height: 280px;
+  transition: border-color var(--t-mid) var(--ease);
+}
+.chart-card:hover { border-color: var(--border-hi); }
+
+.conflict-item {
+  padding: 8px 12px;
+  background: var(--bg-panel); border: 1px solid var(--red-dim);
+  border-radius: var(--radius); margin-bottom: 8px; font-size: 13px;
+  transition: border-color var(--t-mid) var(--ease),
+              background var(--t-mid) var(--ease),
+              box-shadow var(--t-mid) var(--ease);
+}
+.conflict-item:hover {
+  border-color: var(--red);
+  background: rgba(255,34,68,0.07);
+  box-shadow: 0 0 12px var(--red-glow);
+}
+.conflict-header { color: var(--red); font-family: var(--font-mono); font-size: 10px; margin-bottom: 4px; }
+
+/* ── REPORT PANEL ────────────────────────────────────── */
+#report-left {
+  width: 300px; border-right: 1px solid var(--border);
+  padding: 16px; background: var(--bg-deep); overflow-y: auto;
+}
+#report-right { flex: 1; padding: 16px; overflow-y: auto; }
+.entity-checklist { max-height: 280px; overflow-y: auto; margin-bottom: 12px; }
+.entity-check-item {
+  display: flex; align-items: center; gap: 8px; padding: 6px 4px;
+  border-bottom: 1px solid var(--border); font-size: 12px; cursor: pointer;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+  border-radius: 2px;
+}
+.entity-check-item:hover { background: var(--bg-raised); }
+.entity-check-item input[type=checkbox] { accent-color: var(--accent); cursor: pointer; }
+.report-preview {
+  background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: 16px;
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-mid);
+  white-space: pre-wrap; max-height: 500px; overflow-y: auto;
+  line-height: 1.7;
+}
+
+/* ── TIMELINE PANEL ──────────────────────────────────── */
+#snapshot-list {
+  width: 260px; border-right: 1px solid var(--border);
+  overflow-y: auto; padding: 12px; background: var(--bg-deep);
+}
+#snapshot-view { flex: 1; overflow: hidden; position: relative; }
+#snapshot-canvas { width: 100%; height: 100%; }
+.snapshot-item {
+  padding: 9px 10px; border: 1px solid var(--border);
+  border-radius: var(--radius); margin-bottom: 6px; cursor: pointer;
+  transition: border-color var(--t-mid) var(--ease),
+              color var(--t-mid) var(--ease),
+              background var(--t-mid) var(--ease),
+              transform var(--t-fast) var(--ease);
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-mid);
+}
+.snapshot-item:hover {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+  background: var(--accent-halo);
+  transform: translateX(2px);
+}
+.snapshot-item.active { border-color: var(--accent); color: var(--accent); background: var(--accent-halo); }
+
+/* ── TOAST ───────────────────────────────────────────── */
+#toast-container { position: fixed; bottom: 20px; right: 20px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; }
+.toast {
+  padding: 10px 16px; border-radius: var(--radius);
+  font-family: var(--font-mono); font-size: 11px; border: 1px solid;
+  animation: toast-in .2s var(--ease), toast-out .3s var(--ease) 2.7s forwards;
+  max-width: 340px; backdrop-filter: blur(4px);
+}
+.toast.success { background: rgba(0,68,31,0.9); color: var(--green); border-color: rgba(0,255,136,0.3); }
+.toast.error   { background: rgba(102,0,24,0.9); color: var(--red);   border-color: rgba(255,34,68,0.3); }
+.toast.info    { background: rgba(9,20,34,0.95); color: var(--accent); border-color: var(--border-hi); }
+.toast.warn    { background: rgba(102,68,0,0.9); color: var(--amber); border-color: rgba(255,170,0,0.3); }
+@keyframes toast-in  { from{opacity:0;transform:translateX(20px)} to{opacity:1;transform:none} }
+@keyframes toast-out { from{opacity:1} to{opacity:0;transform:translateX(20px)} }
+
+/* ── MISC UTILS ──────────────────────────────────────── */
+.text-accent { color: var(--accent); }
+.text-red    { color: var(--red); }
+.text-green  { color: var(--green); }
+.text-lo     { color: var(--text-lo); }
+.mono        { font-family: var(--font-mono); }
+.divider     { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+.empty-state {
+  text-align: center; padding: 40px 20px;
+  color: var(--text-lo); font-family: var(--font-mono); font-size: 11px;
+}
+.empty-state .empty-icon { font-size: 28px; margin-bottom: 8px; opacity: .3; }
+.tag {
+  font-family: var(--font-mono); font-size: 9px; padding: 2px 7px;
+  border-radius: 8px; border: 1px solid var(--border); color: var(--text-lo);
+}
+
+/* ── GQL PANEL ───────────────────────────────────────── */
+#gql-left {
+  width: 380px; border-right: 1px solid var(--border);
+  padding: 16px; background: var(--bg-deep);
+  display: flex; flex-direction: column; overflow-y: auto;
+}
+#gql-right { flex: 1; overflow-y: auto; padding: 16px; }
+#gql-input { font-family: var(--font-mono); font-size: 12px; min-height: 56px; max-height: 120px; }
+
+.gql-history-item {
+  padding: 7px 10px; border: 1px solid var(--border);
+  border-radius: var(--radius); margin-bottom: 5px; cursor: pointer;
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-mid);
+  transition: border-color var(--t-mid) var(--ease),
+              color var(--t-mid) var(--ease),
+              background var(--t-mid) var(--ease),
+              transform var(--t-fast) var(--ease);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.gql-history-item:hover {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+  background: var(--accent-halo);
+  transform: translateX(2px);
+}
+
+.gql-result-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.gql-result-table th {
+  font-family: var(--font-mono); font-size: 9px; color: var(--accent);
+  text-align: left; padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel); letter-spacing: 1px;
+}
+.gql-result-table td { padding: 7px 10px; border-bottom: 1px solid var(--border); color: var(--text-mid); }
+.gql-result-table tr { transition: background var(--t-fast) var(--ease); }
+.gql-result-table tr:hover td { background: var(--bg-hover); color: var(--text-hi); }
+
+.gql-chip {
+  display: inline-block; font-family: var(--font-mono); font-size: 9px;
+  padding: 3px 8px; border-radius: 8px;
+  border: 1px solid var(--border); color: var(--text-lo); margin: 2px;
+  cursor: pointer;
+  transition: border-color var(--t-mid) var(--ease),
+              color var(--t-mid) var(--ease),
+              background var(--t-mid) var(--ease),
+              transform var(--t-fast) var(--ease);
+}
+.gql-chip:hover {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+  background: var(--accent-halo);
+  transform: scale(1.04);
+}
+
+.gql-path-vis {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px;
+  padding: 12px; background: var(--bg-panel);
+  border-radius: var(--radius); border: 1px solid var(--border);
+  font-family: var(--font-mono); font-size: 12px;
+}
+.gql-path-node {
+  padding: 4px 12px; background: var(--bg-raised);
+  border: 1px solid var(--accent); border-radius: 12px; color: var(--accent);
+  transition: background var(--t-mid) var(--ease), box-shadow var(--t-mid) var(--ease);
+}
+.gql-path-node:hover { background: var(--accent-halo); box-shadow: 0 0 10px var(--accent-glow); }
+.gql-path-edge { color: var(--text-lo); font-size: 9px; font-style: italic; }
+.gql-path-arrow { color: var(--accent-dim); }
+.gql-help-text { font-family: var(--font-mono); font-size: 11px; color: var(--text-lo); line-height: 1.8; white-space: pre; }
+
+/* ── EMBED PANEL ─────────────────────────────────────── */
+#embed-left {
+  width: 300px; border-right: 1px solid var(--border);
+  padding: 16px; background: var(--bg-deep); overflow-y: auto;
+}
+#embed-right { flex: 1; padding: 16px; overflow-y: auto; }
+.embed-status-card {
+  padding: 14px; background: var(--bg-panel);
+  border: 1px solid var(--border); border-radius: var(--radius-lg); margin-bottom: 12px;
+}
+.embed-status-row {
+  display: flex; justify-content: space-between; padding: 5px 0;
+  font-size: 12px; border-bottom: 1px solid var(--border);
+  transition: background var(--t-fast) var(--ease);
+  padding-left: 4px; border-radius: 2px;
+}
+.embed-status-row:last-child { border-bottom: none; }
+.embed-status-row:hover { background: var(--bg-raised); }
+.sim-bar { height: 3px; background: var(--bg-raised); border-radius: 2px; margin-top: 4px; overflow: hidden; }
+.sim-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+  border-radius: 2px;
+  transition: width .6s var(--ease);
+}
+
+.similar-node-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 9px 12px; border: 1px solid var(--border);
+  border-radius: var(--radius); margin-bottom: 6px; cursor: pointer;
+  transition: border-color var(--t-mid) var(--ease),
+              background var(--t-mid) var(--ease),
+              box-shadow var(--t-mid) var(--ease),
+              transform var(--t-fast) var(--ease);
+}
+.similar-node-item:hover {
+  border-color: var(--accent-dim);
+  background: var(--bg-hover);
+  box-shadow: 0 2px 12px rgba(0,0,0,0.3);
+  transform: translateX(2px);
+}
+.similar-node-name { font-family: var(--font-mono); font-size: 12px; color: var(--text-hi); }
+.similar-node-score { font-family: var(--font-mono); font-size: 11px; color: var(--accent); }
+.cluster-node {
+  display: inline-block; font-family: var(--font-mono); font-size: 9px;
+  padding: 2px 8px; border-radius: 8px; margin: 2px;
+  transition: transform var(--t-fast) var(--ease), box-shadow var(--t-mid) var(--ease);
+}
+.cluster-node:hover { transform: scale(1.06); }
+
+/* ── OSINT PANEL ─────────────────────────────────────────────── */
+#osint-left {
+  width: 300px; border-right: 1px solid var(--border);
+  padding: 16px; background: var(--bg-deep); overflow-y: auto;
+}
+#osint-right { flex: 1; overflow-y: auto; padding: 16px; }
+
+/* ── Continuous Loop Activate Button ── */
+#btn-continuous-toggle {
+  width: 100%; margin-bottom: 12px; font-size: 13px;
+  font-family: var(--font-display); letter-spacing: 0.08em;
+  padding: 12px; border-radius: var(--radius);
+  border: 1px solid var(--border); background: var(--bg-raised);
+  color: var(--text); cursor: pointer; position: relative; overflow: hidden;
+  transition: all var(--t-mid) var(--ease);
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+}
+#btn-continuous-toggle.inactive { border-color: var(--accent); color: var(--accent); }
+#btn-continuous-toggle.inactive:hover {
+  background: rgba(0,229,255,0.08); box-shadow: 0 0 16px rgba(0,229,255,0.2);
+}
+#btn-continuous-toggle.active {
+  border-color: var(--red); color: var(--red);
+  background: rgba(248,81,73,0.06);
+  animation: pulse-border 2s ease-in-out infinite;
+}
+#btn-continuous-toggle.active:hover {
+  background: rgba(248,81,73,0.14); box-shadow: 0 0 16px rgba(248,81,73,0.25);
+}
+@keyframes pulse-border {
+  0%,100% { box-shadow: 0 0 6px rgba(248,81,73,0.2); }
+  50%      { box-shadow: 0 0 18px rgba(248,81,73,0.45); }
+}
+#continuous-live-bar {
+  display: none; align-items: center; gap: 8px;
+  padding: 8px 12px; margin-bottom: 12px;
+  background: rgba(0,229,255,0.05); border: 1px solid rgba(0,229,255,0.2);
+  border-radius: var(--radius); font-size: 11px; font-family: var(--font-mono);
+  color: var(--text-mid);
+}
+#continuous-live-bar.visible { display: flex; }
+.live-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+  animation: blink 1s step-start infinite; flex-shrink: 0;
+}
+@keyframes blink { 50% { opacity: 0; } }
+#continuous-cycle-count { color: var(--accent); font-weight: 700; }
+#cycle-progress-wrap { display: none; margin-bottom: 12px; }
+#cycle-progress-wrap.visible { display: block; }
+.progress-label {
+  display: flex; justify-content: space-between;
+  font-size: 10px; font-family: var(--font-mono); color: var(--text-lo);
+  margin-bottom: 4px;
+}
+.progress-bar-bg { height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; }
+.progress-bar-fill { height: 100%; background: var(--accent); transition: width 1s linear; }
+
+.feed-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 10px; border: 1px solid var(--border);
+  border-radius: var(--radius); margin-bottom: 6px;
+  transition: border-color var(--t-mid) var(--ease), background var(--t-mid) var(--ease);
+}
+.feed-item:hover { border-color: var(--border-hi); background: var(--bg-raised); }
+.feed-name { font-size: 12px; color: var(--text-mid); }
+.feed-url { font-family: var(--font-mono); font-size: 9px; color: var(--text-lo); }
+.feed-remove {
+  font-family: var(--font-mono); font-size: 9px; color: var(--red);
+  cursor: pointer; padding: 2px 7px;
+  border: 1px solid var(--red-dim); border-radius: var(--radius);
+  transition: background var(--t-mid) var(--ease), border-color var(--t-mid) var(--ease);
+}
+.feed-remove:hover { background: var(--red-glow); border-color: var(--red); box-shadow: 0 0 8px var(--red-glow); }
+
+.article-log-item {
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  font-size: 11px; transition: background var(--t-fast) var(--ease);
+}
+.article-log-item:hover { background: var(--bg-raised); }
+/* ── Cycle Log cards ── */
+.cycle-card {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 10px 12px; margin-bottom: 8px; font-size: 11px;
+  background: var(--bg-raised); transition: border-color var(--t-mid) var(--ease);
+}
+.cycle-card:hover { border-color: var(--border-hi); }
+.cycle-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.cycle-num { font-family: var(--font-display); font-size: 13px; color: var(--accent); font-weight: 700; }
+.cycle-ts { font-family: var(--font-mono); font-size: 9px; color: var(--text-lo); }
+.cycle-stats { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.cycle-stat { font-family: var(--font-mono); font-size: 10px; }
+.cycle-queries { margin-top: 6px; }
+.cq-row {
+  display: flex; justify-content: space-between;
+  font-family: var(--font-mono); font-size: 9px;
+  padding: 2px 0; border-bottom: 1px solid var(--border); color: var(--text-lo);
+}
+.cq-row:last-child { border-bottom: none; }
+.cq-query { color: var(--purple); }
+.cq-count { color: var(--green); }
+#continuous-total-stats {
+  display: none; grid-template-columns: repeat(4,1fr); gap: 10px; margin-bottom: 14px;
+}
+#continuous-total-stats.visible { display: grid; }
+.art-title { color: var(--text-mid); margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.art-meta { display: flex; gap: 8px; }
+.art-status-ok   { color: var(--green); font-family: var(--font-mono); font-size: 9px; }
+.art-status-err  { color: var(--red);   font-family: var(--font-mono); font-size: 9px; }
+.art-status-skip { color: var(--text-lo); font-family: var(--font-mono); font-size: 9px; }
+.ingest-running {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  background: var(--accent-halo);
+  border: 1px solid var(--accent-dim);
+  border-radius: var(--radius); margin-bottom: 12px;
+  font-family: var(--font-mono); font-size: 10px; color: var(--accent);
+}
+.gdelt-result {
+  padding: 8px 12px; border: 1px solid var(--border);
+  border-radius: var(--radius); margin-bottom: 6px; font-size: 11px;
+  transition: border-color var(--t-mid) var(--ease),
+              background var(--t-mid) var(--ease);
+}
+.gdelt-result:hover { border-color: var(--border-hi); background: var(--bg-raised); }
+.gdelt-title { color: var(--text-mid); margin-bottom: 3px; }
+.gdelt-date { font-family: var(--font-mono); font-size: 9px; color: var(--text-lo); }
+
+/* ── DROP ZONE ───────────────────────────────────────── */
+#drop-zone {
+  border: 2px dashed var(--border) !important;
+  border-radius: var(--radius) !important;
+  padding: 24px !important;
+  text-align: center !important;
+  cursor: pointer !important;
+  transition: border-color var(--t-mid) var(--ease),
+              background var(--t-mid) var(--ease) !important;
+}
+#drop-zone:hover {
+  border-color: var(--accent-dim) !important;
+  background: var(--accent-halo) !important;
+}
+#drop-zone.dragover {
+  border-color: var(--accent) !important;
+  background: var(--accent-halo) !important;
+  box-shadow: inset 0 0 20px var(--accent-halo) !important;
+}
+</style>
+</head>
+<body>
+<div id="app">
+
+<!-- ════════════ HEADER ════════════ -->
+<header id="header">
+  <a href="index.html" class="home-link">← HOME</a>
+  <div class="header-divider"></div>
+  <div class="logo">◈ GOIES<span>GEOPOLITICAL INTELLIGENCE</span></div>
+  <div id="header-stats">
+    <div class="hstat"><span class="lbl">NODES</span><span class="val" id="hstat-nodes">0</span></div>
+    <div class="hstat"><span class="lbl">EDGES</span><span class="val" id="hstat-edges">0</span></div>
+    <div class="hstat"><span class="lbl">DENSITY</span><span class="val" id="hstat-density">0.00</span></div>
+    <div id="ollama-indicator"><div class="pulse-dot checking" id="ollama-dot"></div><span id="ollama-text" style="color:var(--amber)">CHECKING</span></div>
+    <div id="risk-badge" class="risk-LOW">LOW RISK</div>
+  </div>
+  <div class="header-spacer"></div>
+  <select id="model-select"><option value="" disabled selected>Loading models…</option></select>
+</header>
+
+<!-- ════════════ NAV ════════════ -->
+<nav id="nav">
+  <button class="nav-tab active" data-tab="extract">⊕ EXTRACT</button>
+  <button class="nav-tab" data-tab="graph">◈ GRAPH</button>
+  <button class="nav-tab" data-tab="geo">⊛ GEO MAP</button>
+  <button class="nav-tab" data-tab="simulate">⟁ SIMULATE</button>
+  <button class="nav-tab" data-tab="forecast">◎ FORECAST</button>
+  <button class="nav-tab" data-tab="query">⊹ QUERY</button>
+  <button class="nav-tab" data-tab="analytics">⊞ ANALYTICS</button>
+  <button class="nav-tab" data-tab="timeline">⊡ TIMELINE</button>
+  <button class="nav-tab" data-tab="report">⊟ REPORT</button>
+  <button class="nav-tab" data-tab="gql">◎ GQL</button>
+  <button class="nav-tab" data-tab="embed">⊕ SEMANTIC</button>
+  <button class="nav-tab" data-tab="osint">⊛ OSINT</button>
+</nav>
+
+<!-- ════════════ MAIN ════════════ -->
+<main id="main">
+
+<!-- ════ EXTRACT ════ -->
+<div class="panel active" id="panel-extract">
+  <div class="panel-col" style="border-right:1px solid var(--border); width:460px; background:var(--bg-deep)">
+    <div class="panel-scroll">
+      <div class="section-title">INTELLIGENCE INGESTION</div>
+      <div class="ingest-mode-tabs">
+        <button class="ingest-mode active" data-mode="text">TEXT</button>
+        <button class="ingest-mode" data-mode="url">URL</button>
+        <button class="ingest-mode" data-mode="file">FILE</button>
+      </div>
+
+      <div id="ingest-text" class="ingest-pane active">
+        <div class="input-group">
+          <label class="input-label">PASTE INTELLIGENCE TEXT</label>
+          <textarea id="extract-text" rows="10" placeholder="Paste news articles, intelligence reports, diplomatic cables..."></textarea>
+        </div>
+      </div>
+
+      <div id="ingest-url" class="ingest-pane">
+        <div class="input-group">
+          <label class="input-label">URL</label>
+          <input type="url" id="url-input" placeholder="https://example.com/article"/>
+        </div>
+        <button class="btn btn-ghost btn-sm" id="btn-fetch-url" style="margin-bottom:12px">
+          <span class="btn-text">↓ FETCH URL</span><span class="btn-loader">↻</span>
+        </button>
+        <div class="input-group" id="url-text-wrap" style="display:none">
+          <label class="input-label">FETCHED TEXT</label>
+          <textarea id="url-text-preview" rows="8" placeholder="Fetched text will appear here..."></textarea>
+        </div>
+      </div>
+
+      <div id="ingest-file" class="ingest-pane">
+        <div class="input-group">
+          <label class="input-label">UPLOAD FILE (PDF, DOCX, TXT, MD)</label>
+          <div id="drop-zone">
+            <div style="color:var(--text-lo);font-family:var(--font-mono);font-size:11px">Drop file here or click to browse</div>
+            <input type="file" id="file-input" accept=".pdf,.docx,.txt,.md" style="display:none"/>
+          </div>
+          <div id="file-name" style="font-family:var(--font-mono);font-size:10px;color:var(--accent);margin-top:6px;display:none"></div>
+        </div>
+      </div>
+
+      <div class="row-2" style="margin-bottom:12px">
+        <div class="input-group" style="margin-bottom:0">
+          <label class="input-label">MODEL</label>
+          <select id="extract-model"><option value="" disabled selected>Loading models…</option></select>
+        </div>
+        <div class="input-group" style="margin-bottom:0">
+          <label class="input-label">ANALYST PERSONA</label>
+          <select id="extract-persona">
+            <option value="senior geopolitical intelligence analyst">Geopolitical Analyst</option>
+            <option value="military intelligence officer">Military Intel Officer</option>
+            <option value="economic sanctions expert">Economic Analyst</option>
+            <option value="counterterrorism analyst">CT Analyst</option>
+          </select>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <button class="btn btn-primary" id="btn-extract" style="flex:1">
+          <span class="btn-text">▶ EXTRACT INTELLIGENCE</span><span class="btn-loader">↻</span>
+        </button>
+        <button class="btn btn-danger btn-sm" id="btn-clear-graph">CLEAR</button>
+      </div>
+
+      <div id="extract-progress" style="display:none;margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:10px;color:var(--text-lo);margin-bottom:4px">
+          <span id="progress-label">PROCESSING CHUNK 1/1</span>
+          <span id="progress-pct">0%</span>
+        </div>
+        <div style="height:3px;background:var(--bg-raised);border-radius:2px;overflow:hidden">
+          <div id="progress-bar" style="height:100%;background:var(--accent);width:0%;transition:width .3s ease"></div>
+        </div>
+      </div>
+
+      <div id="extract-result-bar" style="display:none;padding:10px 12px;background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:10px">
+        <div style="display:flex;gap:12px;justify-content:center">
+          <div style="text-align:center"><div style="font-family:var(--font-display);font-size:20px;font-weight:900;color:var(--accent)" id="res-entities">0</div><div style="font-family:var(--font-mono);font-size:9px;color:var(--text-lo)">ENTITIES</div></div>
+          <div style="text-align:center"><div style="font-family:var(--font-display);font-size:20px;font-weight:900;color:var(--purple)" id="res-relations">0</div><div style="font-family:var(--font-mono);font-size:9px;color:var(--text-lo)">RELATIONS</div></div>
+          <div style="text-align:center"><div style="font-family:var(--font-display);font-size:20px;font-weight:900;color:var(--green)" id="res-new">0</div><div style="font-family:var(--font-mono);font-size:9px;color:var(--text-lo)">NEW NODES</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel-col" style="flex:1">
+    <div class="panel-scroll">
+      <div class="section-title">EXTRACTION LOG</div>
+      <div id="extract-log"><span class="log-line text-lo">◈ Awaiting input...</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ════ GRAPH ════ -->
+<div class="panel" id="panel-graph">
+  <div id="graph-canvas-wrap">
+    <div id="graph-canvas"></div>
+  </div>
+  <div id="graph-sidebar">
+    <div id="graph-controls">
+      <input type="text" id="node-search" placeholder="Search node…" class="node-search"/>
+      <div class="filter-chips" id="group-chips"></div>
+      <div style="display:flex;gap:6px;margin-top:4px">
+        <button class="btn btn-ghost btn-sm" id="btn-fit">FIT</button>
+        <button class="btn btn-ghost btn-sm" id="btn-reset-filter">RESET</button>
+        <button class="btn btn-ghost btn-sm" id="btn-narrative"><span class="btn-text">BRIEF</span><span class="btn-loader">↻</span></button>
+      </div>
+    </div>
+    <div id="node-inspector">
+      <div class="inspector-empty">◈<br/>Click a node to inspect</div>
+    </div>
+    <div id="watch-bar" style="padding:12px;border-top:1px solid var(--border)">
+      <div class="section-title" style="margin-bottom:8px">ALERT THRESHOLDS</div>
+      <div style="display:flex;gap:6px;margin-bottom:6px">
+        <input type="text" id="watch-node-input" placeholder="Node name…" style="flex:1;font-size:11px;padding:5px 8px"/>
+        <input type="number" id="watch-threshold-input" placeholder="0–100" min="0" max="100" style="width:60px;font-size:11px;padding:5px 8px"/>
+        <button class="btn btn-ghost btn-sm" id="btn-add-watch">SET</button>
+      </div>
+      <div id="watch-list-display" style="font-size:11px;color:var(--text-lo);max-height:90px;overflow-y:auto"></div>
+    </div>
+    <div id="path-bar">
+      <div class="section-title" style="margin-bottom:8px">PATH FINDER</div>
+      <div class="row-2" style="margin-bottom:6px">
+        <input type="text" id="path-src" placeholder="From node…" style="font-size:12px;padding:5px 8px"/>
+        <input type="text" id="path-tgt" placeholder="To node…" style="font-size:12px;padding:5px 8px"/>
+      </div>
+      <button class="btn btn-ghost btn-sm" id="btn-path" style="width:100%">FIND PATH</button>
+      <div id="path-result"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ════ GEO ════ -->
+<div class="panel" id="panel-geo" style="position:relative">
+  <div id="geo-controls">
+    <button class="btn btn-ghost btn-sm" id="btn-geo-refresh">↺ REFRESH</button>
+  </div>
+  <div id="map"></div>
+  <div id="tension-legend">
+    <div class="legend-title">TENSION LEVEL</div>
+    <div class="legend-row"><div class="legend-dot" style="background:#ff2244;box-shadow:0 0 8px #ff2244"></div>CRITICAL (75+)</div>
+    <div class="legend-row"><div class="legend-dot" style="background:#ff6b35"></div>HIGH (50–75)</div>
+    <div class="legend-row"><div class="legend-dot" style="background:#ffaa40"></div>MEDIUM (25–50)</div>
+    <div class="legend-row"><div class="legend-dot" style="background:#ffe066"></div>LOW (10–25)</div>
+    <div class="legend-row"><div class="legend-dot" style="background:#00ff88"></div>MINIMAL (&lt;10)</div>
+  </div>
+</div>
+
+<!-- ════ SIMULATE ════ -->
+<div class="panel" id="panel-simulate">
+  <div id="sim-left">
+    <div class="section-title">POLICY SIMULATION</div>
+    <div class="input-group">
+      <label class="input-label">SCENARIO</label>
+      <textarea id="sim-scenario" rows="5" placeholder="e.g. US lifts all sanctions on Iran&#10;China provides direct military aid to Russia&#10;NATO expands to include Ukraine"></textarea>
+    </div>
+    <button class="btn btn-primary" id="btn-simulate" style="width:100%;margin-bottom:16px">
+      <span class="btn-text">▶ RUN SIMULATION</span><span class="btn-loader">↻</span>
+    </button>
+    <div class="section-title">HISTORY</div>
+    <div id="sim-history-list"><div class="empty-state"><div class="empty-icon">⟁</div>No simulations yet</div></div>
+  </div>
+  <div id="sim-right">
+    <div id="sim-result-empty" class="empty-state" style="padding-top:80px"><div class="empty-icon">⟁</div>Run a simulation to see cascade analysis</div>
+    <div id="sim-result" style="display:none">
+      <div class="risk-gauge">
+        <div class="gauge-ring" id="sim-gauge-ring"><span id="sim-risk-score">0</span></div>
+        <div class="gauge-label" id="sim-risk-label">UNKNOWN</div>
+      </div>
+      <div class="card">
+        <div class="section-title">CASCADE ANALYSIS</div>
+        <div class="cascade-text" id="sim-cascade"></div>
+      </div>
+      <div class="card">
+        <div class="section-title">SECOND-ORDER EFFECTS</div>
+        <div id="sim-second-order"></div>
+      </div>
+      <div class="card">
+        <div class="section-title">AFFECTED ACTORS</div>
+        <div class="affected-nodes" id="sim-affected"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════ FORECAST ════ -->
+<div class="panel" id="panel-forecast">
+  <div id="forecast-left">
+    <div class="section-title">CRISIS FORECAST</div>
+    <div class="input-group">
+      <label class="input-label">FOCUS REGION (OPTIONAL)</label>
+      <input type="text" id="forecast-focus" placeholder="e.g. Middle East, Taiwan..."/>
+    </div>
+    <button class="btn btn-primary" id="btn-forecast" style="width:100%;margin-bottom:20px">
+      <span class="btn-text">▶ GENERATE FORECAST</span><span class="btn-loader">↻</span>
+    </button>
+    <div id="forecast-global-summary" style="display:none">
+      <div class="global-risk-display">
+        <div class="global-risk-score" id="fc-risk-score">—</div>
+        <div class="global-risk-label" id="fc-risk-label">—</div>
+        <div style="font-size:12px;color:var(--text-lo);line-height:1.5" id="fc-structural-summary"></div>
+      </div>
+      <div class="section-title" style="margin-top:12px">HOTSPOT ACTORS</div>
+      <div class="hotspot-list" id="fc-hotspots"></div>
+    </div>
+  </div>
+  <div id="forecast-right">
+    <div id="forecast-empty" class="empty-state" style="padding-top:80px"><div class="empty-icon">◎</div>Generate a forecast to see crisis analysis</div>
+    <div id="forecast-cards" style="display:none"></div>
+  </div>
+</div>
+
+<!-- ════ QUERY ════ -->
+<div class="panel" id="panel-query">
+  <div id="chat-area">
+    <div id="chat-history">
+      <div class="chat-msg assistant">
+        <div class="chat-bubble">◈ GOIES Strategic Analyst ready.<br/>Ask anything about the intelligence graph — actors, relationships, tensions, or strategic assessments.</div>
+        <div class="chat-time">System</div>
+      </div>
+    </div>
+    <div id="chat-input-row">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <label style="font-size:10px;letter-spacing:.08em;color:var(--text-lo);white-space:nowrap">PERSONA</label>
+        <select id="query-persona" style="flex:1;font-size:11px;padding:4px 6px">
+          <option value="senior geopolitical intelligence analyst">Geopolitical Analyst</option>
+          <option value="military intelligence officer">Military Intel Officer</option>
+          <option value="economic sanctions expert">Economic Analyst</option>
+          <option value="counterterrorism analyst">CT Analyst</option>
+        </select>
+      </div>
+      <textarea id="chat-input" rows="2" placeholder="Ask about the intelligence graph..."></textarea>
+      <button class="btn btn-primary" id="btn-query" style="align-self:flex-end">
+        <span class="btn-text">⊹ SEND</span><span class="btn-loader">↻</span>
+      </button>
+    </div>
+  </div>
+  <div id="chat-context-sidebar">
+    <div class="section-title">GRAPH CONTEXT</div>
+    <div id="chat-context-text" style="font-family:var(--font-mono);font-size:11px;color:var(--text-lo);line-height:1.7">Context will appear here after a query...</div>
+  </div>
+</div>
+
+<!-- ════ ANALYTICS ════ -->
+<div class="panel" id="panel-analytics" style="overflow-y:auto;padding:16px;flex-wrap:wrap;align-content:flex-start;gap:12px">
+  <div class="section-title" style="width:100%">GRAPH ANALYTICS</div>
+  <div class="stat-grid" id="stat-grid"></div>
+  <div class="health-ring" id="health-card" style="width:100%;margin:4px 0">
+    <div class="health-circle" id="health-circle">0</div>
+    <div>
+      <div style="font-family:var(--font-display);font-size:11px;font-weight:700;color:var(--accent);margin-bottom:6px">GRAPH HEALTH</div>
+      <div id="health-suggestions" style="font-size:12px;color:var(--text-lo);line-height:1.7"></div>
+    </div>
+  </div>
+  <div class="analytics-charts" style="width:100%">
+    <div class="chart-card"><canvas id="chart-groups"></canvas></div>
+    <div class="chart-card"><canvas id="chart-degree"></canvas></div>
+  </div>
+  <div style="width:100%">
+    <div class="section-title">DETECTED CONFLICTS</div>
+    <div id="conflicts-list"></div>
+  </div>
+</div>
+
+<!-- ════ TIMELINE ════ -->
+<div class="panel" id="panel-timeline">
+  <div id="snapshot-list">
+    <div class="section-title">GRAPH SNAPSHOTS</div>
+    <div id="snapshot-items"></div>
+  </div>
+  <div id="snapshot-view">
+    <div id="snapshot-canvas"></div>
+    <div class="empty-state" id="snapshot-empty" style="padding-top:80px"><div class="empty-icon">⊡</div>Select a snapshot to view</div>
+  </div>
+</div>
+
+<!-- ════ REPORT ════ -->
+<div class="panel" id="panel-report">
+  <div id="report-left">
+    <div class="section-title">REPORT GENERATOR</div>
+    <div class="input-group">
+      <label class="input-label">SELECT ENTITIES</label>
+      <div class="entity-checklist" id="entity-checklist"></div>
+    </div>
+    <div class="input-group">
+      <label class="input-label">FORMAT</label>
+      <select id="report-format">
+        <option value="pdf">PDF Brief</option>
+        <option value="md">Markdown</option>
+      </select>
+    </div>
+    <button class="btn btn-primary" id="btn-report" style="width:100%;margin-bottom:10px">
+      <span class="btn-text">⊟ GENERATE REPORT</span><span class="btn-loader">↻</span>
+    </button>
+    <button class="btn btn-ghost btn-sm" id="btn-export-json" style="width:100%;margin-bottom:6px">EXPORT JSON</button>
+    <button class="btn btn-ghost btn-sm" id="btn-export-csv" style="width:100%;margin-bottom:6px">EXPORT CSV</button>
+    <button class="btn btn-ghost btn-sm" id="btn-export-graphml" style="width:100%">EXPORT GRAPHML</button>
+  </div>
+  <div id="report-right">
+    <div class="section-title">PREVIEW</div>
+    <div class="report-preview" id="report-preview">Report preview will appear here...</div>
+  </div>
+</div>
+
+<!-- ════ GQL ════ -->
+<div class="panel" id="panel-gql">
+  <div id="gql-left">
+    <div class="section-title">GRAPH QUERY LANGUAGE</div>
+    <div class="input-group">
+      <label class="input-label">GQL QUERY</label>
+      <textarea id="gql-input" rows="3" placeholder="find countries&#10;neighbors of Russia&#10;top 5 nodes by betweenness&#10;path from US to Iran"></textarea>
+    </div>
+    <button class="btn btn-primary" id="btn-gql" style="width:100%;margin-bottom:14px">
+      <span class="btn-text">▶ EXECUTE</span><span class="btn-loader">↻</span>
+    </button>
+    <div class="section-title">QUICK QUERIES</div>
+    <div id="gql-quick-chips" style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:14px"></div>
+    <div class="section-title">HISTORY</div>
+    <div id="gql-history"></div>
+    <hr class="divider"/>
+    <button class="btn btn-ghost btn-sm" id="btn-gql-help" style="width:100%">? SYNTAX REFERENCE</button>
+  </div>
+  <div id="gql-right">
+    <div id="gql-result-empty" class="empty-state" style="padding-top:80px"><div class="empty-icon">◎</div>Execute a GQL query to see results</div>
+    <div id="gql-result" style="display:none">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <div>
+          <div style="font-family:var(--font-mono);font-size:10px;color:var(--text-lo)">QUERY</div>
+          <div style="font-family:var(--font-mono);font-size:12px;color:var(--accent)" id="gql-result-query"></div>
+        </div>
+        <div style="font-family:var(--font-display);font-size:18px;font-weight:900;color:var(--accent)" id="gql-result-count"></div>
+      </div>
+      <div id="gql-result-body"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ════ EMBED ════ -->
+<div class="panel" id="panel-embed">
+  <div id="embed-left">
+    <div class="section-title">SEMANTIC EMBEDDINGS</div>
+    <div class="embed-status-card">
+      <div class="embed-status-row"><span class="text-lo mono" style="font-size:11px">STATUS</span><span id="embed-trained-lbl" style="font-family:var(--font-mono);font-size:11px;color:var(--red)">UNTRAINED</span></div>
+      <div class="embed-status-row"><span class="text-lo mono" style="font-size:11px">NODES</span><span id="embed-n-nodes" style="font-family:var(--font-mono);font-size:11px;color:var(--text-mid)">—</span></div>
+      <div class="embed-status-row"><span class="text-lo mono" style="font-size:11px">DIMS</span><span id="embed-dims" style="font-family:var(--font-mono);font-size:11px;color:var(--text-mid)">64</span></div>
+      <div class="embed-status-row"><span class="text-lo mono" style="font-size:11px">TRAINED</span><span id="embed-trained-at" style="font-family:var(--font-mono);font-size:10px;color:var(--text-lo)">—</span></div>
+    </div>
+    <button class="btn btn-primary" id="btn-embed-train" style="width:100%;margin-bottom:10px">
+      <span class="btn-text">⊕ TRAIN EMBEDDINGS</span><span class="btn-loader">↻</span>
+    </button>
+    <hr class="divider"/>
+    <div class="section-title">SEMANTIC SEARCH</div>
+    <div class="input-group">
+      <label class="input-label">SEARCH TERM</label>
+      <input type="text" id="embed-search-input" placeholder="e.g. Russia, sanctions, treaty…"/>
+    </div>
+    <button class="btn btn-ghost btn-sm" id="btn-embed-search" style="width:100%;margin-bottom:12px">SEARCH</button>
+    <hr class="divider"/>
+    <div class="section-title">FIND SIMILAR TO NODE</div>
+    <div class="input-group">
+      <input type="text" id="embed-node-input" placeholder="Node name…"/>
+    </div>
+    <button class="btn btn-ghost btn-sm" id="btn-embed-similar" style="width:100%;margin-bottom:12px">FIND SIMILAR</button>
+    <hr class="divider"/>
+    <div class="section-title">CLUSTER</div>
+    <div class="row-2" style="margin-bottom:8px">
+      <div class="input-group" style="margin-bottom:0">
+        <label class="input-label">K CLUSTERS</label>
+        <input type="text" id="embed-k-input" value="5" style="font-size:12px;padding:5px 8px"/>
+      </div>
+      <button class="btn btn-ghost btn-sm" id="btn-embed-cluster" style="align-self:flex-end">CLUSTER</button>
+    </div>
+  </div>
+  <div id="embed-right">
+    <div id="embed-result-empty" class="empty-state" style="padding-top:80px"><div class="empty-icon">⊕</div>Train embeddings first, then search for similar actors</div>
+    <div id="embed-result" style="display:none">
+      <div class="section-title" id="embed-result-title">RESULTS</div>
+      <div id="embed-result-body"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ════ OSINT ════ -->
+<div class="panel" id="panel-osint">
+  <div id="osint-left">
+
+    <!-- ── CONTINUOUS LOOP ACTIVATE ── -->
+    <div class="section-title">CONTINUOUS INTELLIGENCE LOOP</div>
+
+    <button id="btn-continuous-toggle" class="inactive">
+      <span id="continuous-btn-icon">▶</span>
+      <span id="continuous-btn-label">ACTIVATE LOOP</span>
+    </button>
+
+    <div id="continuous-live-bar">
+      <div class="live-dot"></div>
+      <span>CYCLE&nbsp;<span id="continuous-cycle-count">0</span></span>
+      <span id="continuous-next-in" style="margin-left:auto;color:var(--text-lo)"></span>
+    </div>
+
+    <div id="cycle-progress-wrap">
+      <div class="progress-label">
+        <span>NEXT CYCLE</span>
+        <span id="progress-time-label">—</span>
+      </div>
+      <div class="progress-bar-bg">
+        <div class="progress-bar-fill" id="cycle-progress-fill" style="width:0%"></div>
+      </div>
+    </div>
+
+    <div class="row-2" style="margin-bottom:12px">
+      <div class="input-group" style="margin-bottom:0">
+        <label class="input-label">INTERVAL (SEC)</label>
+        <select id="cont-interval">
+          <option value="60">1 min</option>
+          <option value="300" selected>5 min</option>
+          <option value="600">10 min</option>
+          <option value="1800">30 min</option>
+          <option value="3600">1 hour</option>
+        </select>
+      </div>
+      <div class="input-group" style="margin-bottom:0">
+        <label class="input-label">ARTICLES/FEED</label>
+        <select id="cont-art-limit">
+          <option value="3">3</option>
+          <option value="5" selected>5</option>
+          <option value="10">10</option>
+        </select>
+      </div>
+    </div>
+
+    <hr class="divider"/>
+
+    <!-- ── ONE-SHOT INGEST ── -->
+    <div class="section-title">MANUAL INGEST</div>
+    <div id="osint-ingest-status" style="display:none" class="ingest-running">
+      <span style="animation:spin .8s linear infinite;display:inline-block">↻</span> INGESTION RUNNING…
+    </div>
+    <button class="btn btn-ghost btn-sm" id="btn-osint-ingest" style="width:100%;margin-bottom:8px">
+      <span class="btn-text">▶ INGEST ONCE</span><span class="btn-loader">↻</span>
+    </button>
+    <div class="input-group" style="margin-bottom:10px">
+      <label class="input-label">ARTICLES/FEED</label>
+      <select id="osint-art-limit"><option value="3">3</option><option value="5" selected>5</option><option value="10">10</option></select>
+    </div>
+
+    <hr class="divider"/>
+
+    <!-- ── RSS FEEDS ── -->
+    <div class="section-title">RSS FEEDS</div>
+    <div id="feed-list"></div>
+    <hr class="divider"/>
+    <div class="section-title">ADD FEED</div>
+    <div class="input-group">
+      <label class="input-label">NAME</label>
+      <input type="text" id="feed-name-input" placeholder="e.g. BBC World"/>
+    </div>
+    <div class="input-group">
+      <label class="input-label">RSS URL</label>
+      <input type="url" id="feed-url-input" placeholder="https://…/rss.xml"/>
+    </div>
+    <button class="btn btn-ghost btn-sm" id="btn-add-feed" style="width:100%">+ ADD FEED</button>
+
+    <hr class="divider"/>
+    <div class="section-title">GDELT QUERY</div>
+    <div class="input-group">
+      <input type="text" id="gdelt-entity-input" placeholder="Entity name…"/>
+    </div>
+    <button class="btn btn-ghost btn-sm" id="btn-gdelt-query" style="width:100%">QUERY GDELT</button>
+
+  </div><!-- /osint-left -->
+
+  <div id="osint-right">
+
+    <!-- ── Header row ── -->
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px">
+      <div class="section-title" style="margin:0">LIVE STATUS</div>
+      <button class="btn btn-ghost btn-sm" id="btn-osint-refresh" style="margin-left:auto">↺ REFRESH</button>
+    </div>
+
+    <!-- ── Session totals (shown when continuous loop is active) ── -->
+    <div id="continuous-total-stats"></div>
+
+    <!-- ── One-shot stats ── -->
+    <div id="osint-stats" style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px"></div>
+
+    <!-- ── Tabs: Cycle Log | Article Log ── -->
+    <div style="display:flex;gap:0;margin-bottom:10px;border-bottom:1px solid var(--border)">
+      <button class="nav-tab active" id="osint-tab-cycles" style="font-size:11px;padding:6px 14px" onclick="switchOsintTab('cycles')">CYCLE LOG</button>
+      <button class="nav-tab" id="osint-tab-articles" style="font-size:11px;padding:6px 14px" onclick="switchOsintTab('articles')">ARTICLE LOG</button>
+    </div>
+
+    <div id="osint-view-cycles">
+      <div id="osint-cycle-log">
+        <div class="empty-state"><div class="empty-icon">⊙</div>Start the loop to see cycle history</div>
+      </div>
+    </div>
+
+    <div id="osint-view-articles" style="display:none">
+      <div id="osint-article-log">
+        <div class="empty-state"><div class="empty-icon">⊙</div>No articles ingested yet</div>
+      </div>
+    </div>
+
+    <div id="gdelt-results" style="display:none">
+      <div class="section-title" style="margin-top:14px">GDELT RESULTS</div>
+      <div id="gdelt-result-list"></div>
+    </div>
+
+  </div><!-- /osint-right -->
+</div>
+</main>
+</div>
+
+<div id="toast-container"></div>
+
+<script>
+'use strict';
+
+/* ── API BASE URL — auto-detect ────────────────────────────────────────────── */
+const BASE_URL = (() => {
+  const { protocol, hostname, port } = window.location;
+  // If served from FastAPI on any host, use same-origin
+  return '';
+})();
+
+/* ── APP STATE ──────────────────────────────────────────────────────────────── */
+const S = {
+  graph: { nodes: [], edges: [] },
+  analytics: {},
+  network: null,
+  snapshotNetwork: null,
+  map: null,
+  geoMarkers: [],
+  model: 'llama3.2',
+  allGroups: [],
+  activeGroupFilters: new Set(),
+  chartGroups: null,
+  chartDegree: null,
+};
+
+/* ── API LAYER ──────────────────────────────────────────────────────────────── */
+// FIX: Centralized HTTP error handler — surfaces rate-limit and upload-size errors clearly
+function _apiError(r, e) {
+  if (r.status === 429) return new Error('Rate limit reached — please wait a moment before retrying.');
+  if (r.status === 413) return new Error('File too large — maximum upload size is 10 MB.');
+  return new Error(e.detail || r.statusText || `HTTP ${r.status}`);
+}
+const API = {
+  get: async (path) => {
+    const r = await fetch(path);
+    if (!r.ok) { const e = await r.json().catch(() => ({detail: r.statusText})); throw _apiError(r, e); }
+    return r.json();
+  },
+  post: async (path, body) => {
+    const r = await fetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    if (!r.ok) { const e = await r.json().catch(() => ({detail: r.statusText})); throw _apiError(r, e); }
+    return r.json();
+  },
+  del: async (path) => {
+    const r = await fetch(path, { method:'DELETE' });
+    if (!r.ok) { const e = await r.json().catch(() => ({detail: r.statusText})); throw _apiError(r, e); }
+    return r.json();
+  },
+};
+
+const GROUP_COLORS = {
+  country: '#ff7b72', person: '#ffa657', organization: '#d2a8ff',
+  technology: '#79c0ff', event: '#7ee787', treaty: '#f0e68c',
+  resource: '#56d364', unknown: '#8b949e',
+};
+
+/* ── TOAST ───────────────────────────────────────────────────────────────────── */
+/* ── HTML ESCAPE HELPER — used wherever LLM-derived strings go into innerHTML ── */
+function esc(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function toast(msg, type = 'info') {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  document.getElementById('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 3200);
+}
+
+/* ── LOADING STATE ───────────────────────────────────────────────────────────── */
+function setLoading(btnId, on) {
+  const btn = document.getElementById(btnId);
+  if (!btn) return;
+  btn.classList.toggle('loading', on);
+  btn.disabled = on;
+}
+
+/* ── HEADER UPDATE ───────────────────────────────────────────────────────────── */
+function updateHeader(analytics) {
+  if (!analytics) return;
+  document.getElementById('hstat-nodes').textContent = analytics.nodes ?? 0;
+  document.getElementById('hstat-edges').textContent = analytics.edges ?? 0;
+  document.getElementById('hstat-density').textContent = (analytics.density ?? 0).toFixed(3);
+  const tensions = analytics.tensions || {};
+  const scores = Object.values(tensions).map(t => (typeof t === 'object' ? t.score : t) || 0);
+  const maxTension = scores.length ? Math.max(...scores) : 0;
+  const label = maxTension >= 75 ? 'CRITICAL' : maxTension >= 50 ? 'HIGH' : maxTension >= 25 ? 'MEDIUM' : 'LOW';
+  const badge = document.getElementById('risk-badge');
+  badge.textContent = label + ' RISK';
+  badge.className = `risk-${label}`;
+}
+
+/* ── OLLAMA HEALTH ───────────────────────────────────────────────────────────── */
+async function checkOllama() {
+  const dot       = document.getElementById('ollama-dot');
+  const txt       = document.getElementById('ollama-text');
+  const indicator = document.getElementById('ollama-indicator');
+
+  // Checking state
+  dot.className = 'pulse-dot checking';
+  txt.textContent = 'CHECKING';
+  txt.style.color = 'var(--amber)';
+  indicator.className = '';
+
+  let data = null;
+  try {
+    const r = await fetch('/api/health', { signal: AbortSignal.timeout(4000) });
+    if (r.ok) data = await r.json();
+  } catch {}
+
+  // Issue-28: removed direct browser → localhost:11434 fallback.
+  // That hardcoded URL only worked when browser and Ollama shared the same machine
+  // and would silently reach unintended services in hosted/containerised deployments.
+  // The /api/health proxy is the sole authoritative Ollama status source.
+
+  if (data && data.ollama === 'online') {
+    dot.className = 'pulse-dot';
+    txt.textContent = 'ONLINE';
+    txt.style.color = 'var(--green)';
+    indicator.className = 'is-online';
+    const models = (data.models || ['llama3.2']).map(m => typeof m === 'string' ? m : (m.name || m));
+    ['model-select','extract-model'].forEach(id => {
+      const sel = document.getElementById(id);
+      if (!sel) return;
+      const current = sel.value;
+      sel.innerHTML = models.map(m => `<option value="${m}"${m===current?' selected':''}>${m}</option>`).join('');
+      if (!sel.value && models.length) sel.value = models[0];
+      S.model = document.getElementById('model-select').value || models[0];
+    });
+  } else {
+    dot.className = 'pulse-dot offline';
+    txt.textContent = 'OFFLINE';
+    txt.style.color = 'var(--red)';
+    indicator.className = 'is-offline';
+    ['model-select','extract-model'].forEach(id => {
+      const sel = document.getElementById(id);
+      if (!sel || sel.querySelector('option:not([disabled])')) return;
+      sel.innerHTML = '<option value="llama3.2">llama3.2 (offline)</option>';
+      S.model = 'llama3.2';
+    });
+  }
+}
+
+/* ── INGEST MODE TABS ────────────────────────────────────────────────────────── */
+document.querySelectorAll('.ingest-mode').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.ingest-mode').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.ingest-pane').forEach(p => { p.classList.remove('active'); p.style.display = 'none'; });
+    btn.classList.add('active');
+    const pane = document.getElementById(`ingest-${btn.dataset.mode}`);
+    if (pane) { pane.classList.add('active'); pane.style.display = 'block'; }
+  });
+});
+
+/* ── NAV TABS ────────────────────────────────────────────────────────────────── */
+document.querySelectorAll('.nav-tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.nav-tab').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    const tab = btn.dataset.tab;
+    const panel = document.getElementById(`panel-${tab}`);
+    if (panel) panel.classList.add('active');
+    // Tab-specific actions
+    if (tab === 'graph')     { if (!S.network) loadGraphData().then(initOrUpdateGraph); else { initOrUpdateGraph(); S.network.fit(); } }
+    if (tab === 'geo')       { if (!S.map) initOrUpdateMap(); else loadGeoData(); }
+    if (tab === 'analytics') { renderAnalytics(); }
+    if (tab === 'timeline')  { loadTimeline(); }
+    if (tab === 'report')    { renderEntityChecklist(); }
+    if (tab === 'gql')       { initGQL(); }
+    if (tab === 'embed')     { refreshEmbedStatus(); }
+    if (tab === 'osint')     { refreshOsintStatus(); refreshContinuousStatus(); }
+  });
+});
+
+document.getElementById('model-select').addEventListener('change', e => { S.model = e.target.value; });
+
+/* ── WATCH LIST ──────────────────────────────────────────────────────────────────────────────── */
+const _watchThresholds = {};
+function renderWatchList() {
+  const el = document.getElementById('watch-list-display');
+  if (!el) return;
+  const entries = Object.entries(_watchThresholds);
+  if (!entries.length) { el.innerHTML = '<span style="color:var(--text-lo)">No thresholds set</span>'; return; }
+  el.innerHTML = entries.map(([n,v]) =>
+    `<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:0.5px solid var(--border)">` +
+    `<span style="color:var(--text-mid);font-family:var(--font-mono)">${n}</span>` +
+    `<span style="display:flex;gap:6px;align-items:center">` +
+    `<span style="color:var(--accent)">&ge;${v}</span>` +
+    `<span style="cursor:pointer;color:var(--red);font-size:13px" onclick="removeWatch('${n}')">×</span>` +
+    `</span></div>`
+  ).join('');
+}
+function removeWatch(node) {
+  delete _watchThresholds[node];
+  API.post('/api/watch_list', { thresholds: _watchThresholds }).catch(() => {});
+  renderWatchList();
+  toast(`Alert removed: ${node}`, 'info');
+}
+document.getElementById('btn-add-watch').addEventListener('click', async () => {
+  const node = document.getElementById('watch-node-input').value.trim();
+  const val  = parseFloat(document.getElementById('watch-threshold-input').value);
+  if (!node || isNaN(val) || val < 0 || val > 100) { toast('Enter a node name and a threshold between 0–100', 'warn'); return; }
+  _watchThresholds[node] = val;
+  try {
+    await API.post('/api/watch_list', { thresholds: _watchThresholds });
+    document.getElementById('watch-node-input').value = '';
+    document.getElementById('watch-threshold-input').value = '';
+    renderWatchList();
+    toast(`Alert set: ${node} ≥ ${val}`, 'success');
+  } catch(e) { toast(e.message, 'error'); }
+});
+renderWatchList();
+
+/* ── FILE UPLOAD ─────────────────────────────────────────────────────────────── */
+/* ── FILE UPLOAD STATE ───────────────────────────────────────────────────────── */
+// FIX-3: Store file text here so the extract handler always reads the right source
+let _fileText = '';
+const fileInput = document.getElementById('file-input');
+const dropZone = document.getElementById('drop-zone');
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault(); dropZone.style.borderColor = 'var(--border)';
+  const file = e.dataTransfer.files[0];
+  if (file) handleFileSelect(file);
+});
+fileInput.addEventListener('change', () => { if (fileInput.files[0]) handleFileSelect(fileInput.files[0]); });
+
+async function handleFileSelect(file) {
+  const nameEl = document.getElementById('file-name');
+  nameEl.textContent = file.name; nameEl.style.display = 'block';
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    const r = await fetch('/api/ingest/file', { method: 'POST', body: fd });
+    if (!r.ok) throw new Error((await r.json()).detail);
+    const data = await r.json();
+    // FIX-3: Store into _fileText — don't switch tabs (that caused a race condition)
+    _fileText = data.text || '';
+    nameEl.textContent = `${file.name}  (${_fileText.length.toLocaleString()} chars loaded)`;
+    toast(`File loaded: ${data.filename} — click EXTRACT to process`, 'success');
+  } catch(e) { toast(`File error: ${e.message}`, 'error'); }
+}
+
+/* ── URL FETCH ───────────────────────────────────────────────────────────────── */
+document.getElementById('btn-fetch-url').addEventListener('click', async () => {
+  const url = document.getElementById('url-input').value.trim();
+  if (!url) { toast('Enter a URL', 'warn'); return; }
+  setLoading('btn-fetch-url', true);
+  try {
+    const data = await API.post('/api/ingest/url/fetch', { url });
+    document.getElementById('url-text-wrap').style.display = 'block';
+    document.getElementById('url-text-preview').value = data.text || '';
+    toast('URL fetched', 'success');
+  } catch(e) { toast(`Fetch error: ${e.message}`, 'error'); }
+  finally { setLoading('btn-fetch-url', false); }
+});
+
+/* ── EXTRACTION LOG ──────────────────────────────────────────────────────────── */
+function logLine(msg, cls = '') {
+  const log = document.getElementById('extract-log');
+  const line = document.createElement('div');
+  line.className = `log-line ${cls}`;
+  line.textContent = msg;
+  log.appendChild(line);
+  log.scrollTop = log.scrollHeight;
+}
+function clearLog() { document.getElementById('extract-log').innerHTML = ''; }
+
+/* ── EXTRACT ─────────────────────────────────────────────────────────────────── */
+document.getElementById('btn-extract').addEventListener('click', async () => {
+  const mode = document.querySelector('.ingest-mode.active')?.dataset.mode || 'text';
+  let text = '';
+  if (mode === 'text') text = document.getElementById('extract-text').value.trim();
+  else if (mode === 'url') text = document.getElementById('url-text-preview').value.trim();
+  else if (mode === 'file') text = _fileText; // FIX-3: was reading wrong textarea
+
+  if (!text) { toast('No text to extract from', 'warn'); return; }
+  const model = document.getElementById('extract-model').value;
+  const persona = document.getElementById('extract-persona').value;
+
+  clearLog();
+  setLoading('btn-extract', true);
+  document.getElementById('extract-progress').style.display = 'block';
+  document.getElementById('extract-result-bar').style.display = 'none';
+  let totalEntities = 0, totalRelations = 0, totalNew = 0;
+
+  try {
+    const resp = await fetch('/api/extract/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, model, persona }),
+    });
+    if (!resp.ok) throw new Error((await resp.json()).detail);
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      let _streamDone = false;
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        try {
+          const payload = JSON.parse(line.slice(6));
+          if (payload.error) { logLine(`✗ ${payload.error}`, 'err'); _streamDone = true; break; }
+          if (payload.parse_error) logLine(`⚠ Chunk ${payload.chunk} parse error (skipped): ${payload.parse_error}`, 'warn');
+          if (payload.done) {
+            logLine(`✓ Extraction complete: ${payload.totals.entities}E ${payload.totals.relations}R ${payload.totals.new_nodes.length} new nodes`, 'ok');
+            _streamDone = true; break;
+          }
+          const pct = Math.round((payload.chunk / payload.total_chunks) * 100);
+          document.getElementById('progress-bar').style.width = pct + '%';
+          document.getElementById('progress-label').textContent = `PROCESSING CHUNK ${payload.chunk}/${payload.total_chunks}`;
+          document.getElementById('progress-pct').textContent = pct + '%';
+          if (payload.entities > 0) logLine(`[${payload.chunk}/${payload.total_chunks}] +${payload.entities} entities, +${payload.relations} relations`, 'chunk');
+          (payload.new_node_ids || []).forEach(n => logLine(`  ⊕ ${n}`, 'entity'));
+          totalEntities += payload.entities || 0;
+          totalRelations += payload.relations || 0;
+          totalNew += (payload.new_node_ids || []).length;
+          // Issue 16/17: server now sends vis_delta (new nodes only) mid-stream,
+          // and full vis+analytics only in the done event — avoids serialising the
+          // full graph on every chunk.
+          if (payload.vis_delta && S.network) {
+            // Incrementally add new nodes/edges to the live network
+            S.network.body.data.nodes.update(payload.vis_delta.nodes || []);
+            S.network.body.data.edges.update(payload.vis_delta.edges || []);
+          }
+          if (payload.done && payload.vis) {
+            S.graph = payload.vis;
+            S.analytics = payload.analytics;
+            updateHeader(payload.analytics);
+            if (S.network) {
+              S.network.setData({
+                nodes: new vis.DataSet(S.graph.nodes || []),
+                edges: new vis.DataSet(S.graph.edges || []),
+              });
             }
-        )
-    edges = []
-    for u, v, data in g.edges(data=True):
-        edges.append(
-            {
-                "from": u,
-                "to": v,
-                "label": data.get("label", ""),
-                "arrows": "to",
-                "color": {
-                    "color": "#1e3a5f",
-                    "highlight": "#00e5ff",
-                    "hover": "#00e5ff",
-                    "inherit": False,
-                },
-                "font": {
-                    "color": "#3d5a7a",
-                    "size": 10,
-                    "align": "middle",
-                    "strokeWidth": 0,
-                },
-                "width": 1.5,
-                "smooth": {"type": "continuous"},
-                "confidence": data.get("confidence", 1.0),
-            }
-        )
-    return {"nodes": nodes, "edges": edges}
+          }
+        } catch {}
+      }
+      if (_streamDone) break;  // exit outer while(true) — stream complete or errored
+    }
+    document.getElementById('res-entities').textContent = totalEntities;
+    document.getElementById('res-relations').textContent = totalRelations;
+    document.getElementById('res-new').textContent = totalNew;
+    document.getElementById('extract-result-bar').style.display = 'block';
+    toast(`Extracted: ${totalEntities} entities, ${totalRelations} relations`, 'success');
+  } catch(e) { logLine(`✗ ${e.message}`, 'err'); toast(e.message, 'error'); }
+  finally { setLoading('btn-extract', false); document.getElementById('extract-progress').style.display = 'none'; }
+});
 
+/* ── CLEAR GRAPH ─────────────────────────────────────────────────────────────── */
+document.getElementById('btn-clear-graph').addEventListener('click', async () => {
+  if (!confirm('Clear the entire intelligence graph? This cannot be undone.')) return;
+  try {
+    await API.del('/api/graph');
+    S.graph = { nodes: [], edges: [] };
+    S.analytics = {};
+    updateHeader({});
+    if (S.network) S.network.setData({ nodes: new vis.DataSet([]), edges: new vis.DataSet([]) });
+    clearLog();
+    logLine('◈ Graph cleared.', 'ok');
+    toast('Graph cleared', 'info');
+  } catch(e) { toast(e.message, 'error'); }
+});
 
-def _apply_chunk(result: ChunkResult) -> None:
-    """Sync callback: merge a ChunkResult into the global graph under lock."""
-    with _graph_lock:
-        for ent in result.entities:
-            canonical = resolve_node_name(graph, ent.id)
-            if not graph.has_node(canonical):
-                graph.add_node(
-                    canonical,
-                    title=str(ent.attributes),
-                    group=ent.group,
-                    confidence=ent.confidence,
-                )
-            else:
-                existing = graph.nodes[canonical]
-                if existing.get("group", "unknown") == "unknown":
-                    existing["group"] = ent.group
-                if ent.confidence > existing.get("confidence", 0.0):
-                    existing["title"] = str(ent.attributes)
-                    existing["confidence"] = ent.confidence
-        for rel in result.relationships:
-            src = resolve_node_name(graph, rel.from_id)
-            tgt = resolve_node_name(graph, rel.to_id)
-            for n in (src, tgt):
-                if not graph.has_node(n):
-                    graph.add_node(n, group="unknown")
-            graph.add_edge(src, tgt, label=rel.label, confidence=rel.confidence)
+/* ── LOAD GRAPH ──────────────────────────────────────────────────────────────── */
+async function loadGraphData() {
+  try {
+    const data = await API.get('/api/graph');
+    S.graph = data.vis || { nodes: [], edges: [] };
+    S.analytics = data.analytics || {};
+    updateHeader(data.analytics);
+    S.allGroups = [...new Set((S.graph.nodes || []).map(n => n.group || 'unknown'))];
+    return data;
+  } catch(e) {
+    // Return null — callers must check before dereferencing
+    return null;
+  }
+}
 
+/* ── VIS.JS GRAPH ────────────────────────────────────────────────────────────── */
+function initOrUpdateGraph() {
+  const container = document.getElementById('graph-canvas');
+  const nodes = new vis.DataSet(S.graph.nodes || []);
+  const edges = new vis.DataSet(S.graph.edges || []);
+  const options = {
+    nodes: { shape: 'dot', size: 16, font: { color: '#e2ecf8', size: 13, face: 'Rajdhani' }, borderWidth: 2 },
+    edges: { arrows: 'to', smooth: { type: 'continuous' }, font: { color: '#3d5a7a', size: 10, align: 'middle', strokeWidth: 0 }, width: 1.5 },
+    physics: { barnesHut: { gravitationalConstant: -12000, springLength: 120, springConstant: 0.04 }, stabilization: { iterations: 150 } },
+    interaction: { hover: true, tooltipDelay: 200 },
+    layout: { improvedLayout: true },
+  };
+  if (!S.network) {
+    S.network = new vis.Network(container, { nodes, edges }, options);
+    S.network.on('click', p => { if (p.nodes.length) inspectNode(p.nodes[0]); });
+    S.network.on('doubleClick', p => { if (p.nodes.length) filterEgo(p.nodes[0]); });
+    container.style.background = 'var(--bg-void)';
+  } else {
+    S.network.setData({ nodes, edges });
+  }
+  S.allGroups = [...new Set((S.graph.nodes || []).map(n => n.group || 'unknown'))];
+  renderGroupChips();
+}
 
-def _update_graph(entities: list[Entity], relationships: list[Relationship]) -> dict:
-    """Batch-apply entities + relationships; returns diff summary."""
-    nodes_added, edges_added, new_ids = 0, 0, []
-    result = ChunkResult(
-        entities=entities, relationships=relationships, chunk_index=0, elapsed=0.0
-    )
-    with _graph_lock:
-        before_nodes = graph.number_of_nodes()
-        before_edges = graph.number_of_edges()
-    _apply_chunk(result)
-    save_graph(graph)
-    with _graph_lock:
-        nodes_added = graph.number_of_nodes() - before_nodes
-        edges_added = graph.number_of_edges() - before_edges
-        new_ids = [
-            n
-            for n in graph.nodes()
-            if n
-            not in set(
-                n2 for n2, _ in graph.nodes(data=True) if _.get("ingested_at", "") == ""
-            )
-        ]
-    return {
-        "nodes_added": nodes_added,
-        "edges_added": edges_added,
-        "new_node_ids": new_ids,
+function inspectNode(nodeId) {
+  const nodeData = (S.graph.nodes || []).find(n => n.id === nodeId);
+  if (!nodeData) return;
+  const inspector = document.getElementById('node-inspector');
+  const color = GROUP_COLORS[nodeData.group] || '#8b949e';
+  const edges_out = (S.graph.edges || []).filter(e => e.from === nodeId);
+  const edges_in  = (S.graph.edges || []).filter(e => e.to === nodeId);
+  // FIX-4: Use pre-parsed _attrs dict from server — never eval() user-controlled data
+  const attrs = (typeof nodeData._attrs === 'object' && nodeData._attrs) ? nodeData._attrs : {};
+  const safeId = esc(nodeId);
+  inspector.innerHTML = `
+    <div class="node-name">${safeId}</div>
+    <div class="node-group-badge" style="background:${color}22;border:1px solid ${color}44;color:${color}">${esc((nodeData.group||'unknown').toUpperCase())}</div>
+    <div class="attr-row"><span class="attr-key">CONFIDENCE</span><span class="attr-val">${((nodeData.confidence||1)*100).toFixed(0)}%</span></div>
+    ${Object.entries(attrs).map(([k,v]) => `<div class="attr-row"><span class="attr-key">${esc(k)}</span><span class="attr-val">${esc(v)}</span></div>`).join('')}
+    <div class="section-title" style="margin-top:12px">OUTGOING (${edges_out.length})</div>
+    ${edges_out.slice(0,8).map(e => `<div class="rel-item">${safeId}<span class="arrow">→</span>${esc(e.to)}<br/><span class="label">${esc(e.label||'')}</span></div>`).join('')}
+    <div class="section-title" style="margin-top:8px">INCOMING (${edges_in.length})</div>
+    ${edges_in.slice(0,8).map(e => `<div class="rel-item">${esc(e.from)}<span class="arrow">→</span>${safeId}<br/><span class="label">${esc(e.label||'')}</span></div>`).join('')}
+    <div style="margin-top:12px;display:flex;gap:6px">
+      <button class="btn btn-ghost btn-sm" style="flex:1" data-ego-node="${safeId}" onclick="filterEgo(this.dataset.egoNode)">EGO VIEW</button>
+    </div>
+    <div style="margin-top:10px">
+      <div class="section-title" style="margin-bottom:6px">MERGE NODE</div>
+      <div style="display:flex;gap:6px">
+        <input type="text" id="merge-target-input" placeholder="Merge '${safeId}' into…" style="flex:1;font-size:11px;padding:5px 8px"/>
+        <button class="btn btn-ghost btn-sm" onclick="doMergeNode('${safeId}')">MERGE</button>
+      </div>
+      <div id="merge-result-${safeId}" style="font-size:11px;margin-top:4px;color:var(--text-lo)"></div>
+    </div>
+  `;
+}
+
+async function filterEgo(nodeId) {
+  try {
+    const data = await API.get(`/api/graph?ego=${encodeURIComponent(nodeId)}&hops=2`);
+    S.graph = data.vis || { nodes: [], edges: [] };
+    initOrUpdateGraph();
+    toast(`Ego view: ${nodeId}`, 'info');
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function doMergeNode(sourceId) {
+  const input = document.getElementById('merge-target-input');
+  if (!input) return;
+  const target = input.value.trim();
+  if (!target) { toast('Enter a node name to merge into', 'warn'); return; }
+  if (target === sourceId) { toast('Cannot merge a node into itself', 'warn'); return; }
+  try {
+    await API.post('/api/node/merge', { source: sourceId, target });
+    toast(`Merged '${sourceId}' into '${target}'`, 'success');
+    const data = await loadGraphData();
+    if (data) { S.graph = data.vis; S.analytics = data.analytics; updateHeader(data.analytics); initOrUpdateGraph(); }
+    document.getElementById('node-inspector').innerHTML = '<div class="inspector-empty">◈<br/>Click a node to inspect</div>';
+  } catch(e) { toast(`Merge failed: ${e.message}`, 'error'); }
+}
+
+function renderGroupChips() {
+  const container = document.getElementById('group-chips');
+  container.innerHTML = '';
+  S.allGroups.forEach(group => {
+    const color = GROUP_COLORS[group] || '#8b949e';
+    const chip = document.createElement('div');
+    chip.className = `chip ${S.activeGroupFilters.size === 0 || S.activeGroupFilters.has(group) ? 'active' : 'inactive'}`;
+    chip.style.cssText = `color:${color};border-color:${color}44;background:${color}11`;
+    chip.textContent = group.toUpperCase();
+    chip.addEventListener('click', () => {
+      if (S.activeGroupFilters.has(group)) S.activeGroupFilters.delete(group);
+      else S.activeGroupFilters.add(group);
+      applyGroupFilter();
+    });
+    container.appendChild(chip);
+  });
+}
+
+function applyGroupFilter() {
+  if (!S.network) return;
+  const all = S.graph.nodes || [];
+  const filtered = S.activeGroupFilters.size === 0 ? all : all.filter(n => S.activeGroupFilters.has(n.group || 'unknown'));
+  const ids = new Set(filtered.map(n => n.id));
+  const filtEdges = (S.graph.edges || []).filter(e => ids.has(e.from) && ids.has(e.to));
+  S.network.setData({ nodes: new vis.DataSet(filtered), edges: new vis.DataSet(filtEdges) });
+  renderGroupChips();
+}
+
+document.getElementById('btn-fit').addEventListener('click', () => S.network?.fit());
+document.getElementById('btn-reset-filter').addEventListener('click', () => { S.activeGroupFilters.clear(); initOrUpdateGraph(); });
+document.getElementById('btn-narrative').addEventListener('click', async () => {
+  setLoading('btn-narrative', true);
+  try {
+    const data = await API.get(`/api/narrative/summary?model=${S.model}`);
+    toast('Brief generated', 'success');
+    document.querySelector('[data-tab=query]').click();
+    addChatMessage('assistant', data.narrative);
+  } catch(e) { toast(e.message, 'error'); }
+  finally { setLoading('btn-narrative', false); }
+});
+
+document.getElementById('node-search').addEventListener('input', e => {
+  const q = e.target.value.trim().toLowerCase();
+  if (!S.network || !q) { if (S.network) S.network.fit(); return; }
+  const match = (S.graph.nodes || []).find(n => n.id.toLowerCase().includes(q));
+  if (match) { S.network.focus(match.id, { scale: 1.5, animation: { duration: 400 } }); S.network.selectNodes([match.id]); inspectNode(match.id); }
+});
+
+document.getElementById('btn-path').addEventListener('click', async () => {
+  const src = document.getElementById('path-src').value.trim();
+  const tgt = document.getElementById('path-tgt').value.trim();
+  if (!src || !tgt) { toast('Enter source and target nodes', 'warn'); return; }
+  try {
+    const data = await API.get(`/api/path?src=${encodeURIComponent(src)}&tgt=${encodeURIComponent(tgt)}`);
+    const el = document.getElementById('path-result');
+    if (data.found) { el.textContent = data.nodes.join(' → '); el.style.color = 'var(--accent)'; if (S.network) S.network.selectNodes(data.nodes); }
+    else { el.textContent = 'No path found between these nodes.'; el.style.color = 'var(--red)'; }
+  } catch(e) { toast(e.message, 'error'); }
+});
+
+/* ── GEO MAP ─────────────────────────────────────────────────────────────────── */
+function initOrUpdateMap() {
+  if (!S.map) {
+    S.map = L.map('map', { zoomControl: true, attributionControl: false });
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 18 }).addTo(S.map);
+    S.map.setView([20, 0], 2);
+  }
+  loadGeoData();
+}
+
+async function loadGeoData() {
+  try {
+    const data = await API.get('/api/geo');
+    S.geoMarkers.forEach(m => S.map.removeLayer(m));
+    S.geoMarkers = [];
+    (data.markers || []).forEach(marker => {
+      const t = marker.tension || 0;
+      const color = t >= 75 ? '#ff2244' : t >= 50 ? '#ff6b35' : t >= 25 ? '#ffaa40' : t >= 10 ? '#ffe066' : '#00ff88';
+      const radius = 8 + (t / 100) * 16;
+      const circle = L.circleMarker([marker.lat, marker.lon], { radius, fillColor: color, color, weight: 1, opacity: .9, fillOpacity: .6 });
+      circle.bindPopup(`<div style="font-family:Rajdhani,sans-serif;background:#0a1528;color:#e2ecf8;padding:4px;min-width:160px;border-radius:4px"><div style="font-size:15px;font-weight:700;color:${color};margin-bottom:4px">${marker.id}</div><div style="font-size:12px;color:#94aec8">Type: ${marker.group}</div><div style="font-size:12px;color:${color}">Tension: <b>${marker.tension}</b>/100</div>${marker.alert?'<div style="color:#ff2244;font-size:11px;margin-top:4px">⚠ ALERT THRESHOLD EXCEEDED</div>':''}<div style="font-size:11px;color:#4a6480;margin-top:4px">${(marker.connections||[]).slice(0,3).join('<br/>')}</div></div>`, { className: 'geo-popup' });
+      if (t >= 75) {
+        const pulse = L.circleMarker([marker.lat, marker.lon], { radius: radius + 6, fillColor: color, color, weight: 1, opacity: .3, fillOpacity: .1 });
+        pulse.addTo(S.map); S.geoMarkers.push(pulse);
+      }
+      circle.addTo(S.map); S.geoMarkers.push(circle);
+    });
+    toast(`Geo data: ${data.total} countries mapped`, 'info');
+  } catch(e) { toast(`Geo error: ${e.message}`, 'error'); }
+}
+
+document.getElementById('btn-geo-refresh').addEventListener('click', loadGeoData);
+
+/* ── SIMULATE ────────────────────────────────────────────────────────────────── */
+document.getElementById('btn-simulate').addEventListener('click', async () => {
+  const scenario = document.getElementById('sim-scenario').value.trim();
+  if (!scenario) { toast('Enter a scenario', 'warn'); return; }
+  setLoading('btn-simulate', true);
+  try {
+    const data = await API.post('/api/simulate', { scenario, model: S.model });
+    renderSimResult(data); loadSimHistory();
+  } catch(e) { toast(`Simulation failed: ${e.message}`, 'error'); }
+  finally { setLoading('btn-simulate', false); }
+});
+
+function renderSimResult(data) {
+  const color = { LOW:'#00ff88', MEDIUM:'#ffaa00', HIGH:'#ff6b35', CRITICAL:'#ff2244' }[data.risk_label] || '#00d4ff';
+  const ring = document.getElementById('sim-gauge-ring');
+  ring.style.borderColor = color; ring.style.boxShadow = `0 0 20px ${color}44`; ring.style.color = color;
+  document.getElementById('sim-risk-score').textContent = Math.round(data.risk_score);
+  document.getElementById('sim-risk-label').textContent = data.risk_label; document.getElementById('sim-risk-label').style.color = color;
+  document.getElementById('sim-cascade').textContent = data.cascade_narrative;
+  document.getElementById('sim-second-order').innerHTML = (data.second_order || []).map(e => `<div class="second-order-item">${esc(e)}</div>`).join('');
+  document.getElementById('sim-affected').innerHTML = (data.affected_nodes || []).map(n => `<span class="anode">${esc(n)}</span>`).join('');
+  document.getElementById('sim-result-empty').style.display = 'none';
+  document.getElementById('sim-result').style.display = 'block';
+}
+
+async function loadSimHistory() {
+  try {
+    const data = await API.get('/api/simulations');
+    const list = document.getElementById('sim-history-list');
+    if (!data.history?.length) { list.innerHTML = '<div class="empty-state"><div class="empty-icon">⟁</div>No simulations yet</div>'; return; }
+    // Store history in a module cache — avoids inline JSON in onclick which breaks
+    // when scenario text contains apostrophes or double-quotes.
+    window._simHistoryCache = data.history.slice(0,10);
+    list.innerHTML = window._simHistoryCache.map((h, i) => {
+      const color = { LOW:'#00ff88', MEDIUM:'#ffaa00', HIGH:'#ff6b35', CRITICAL:'#ff2244' }[h.risk_label] || '#00d4ff';
+      return `<div class="sim-history-item" data-sim-idx="${i}" onclick="renderSimResult(window._simHistoryCache[+this.dataset.simIdx])">
+        <div class="scenario-text">${esc(h.scenario)}</div>
+        <div class="sim-meta"><span class="risk-pill" style="background:${color}22;color:${color};border:1px solid ${color}44">${esc(h.risk_label)}</span><span class="text-lo" style="font-size:10px;font-family:var(--font-mono)">${new Date(h.timestamp).toLocaleTimeString()}</span></div>
+      </div>`;
+    }).join('');
+  } catch {}
+}
+
+/* ── FORECAST ────────────────────────────────────────────────────────────────── */
+document.getElementById('btn-forecast').addEventListener('click', async () => {
+  const focus = document.getElementById('forecast-focus').value.trim();
+  setLoading('btn-forecast', true);
+  try {
+    const data = await API.post('/api/forecast', { model: S.model, focus });
+    renderForecast(data);
+  } catch(e) { toast(`Forecast failed: ${e.message}`, 'error'); }
+  finally { setLoading('btn-forecast', false); }
+});
+
+function renderForecast(data) {
+  const color = { LOW:'#00ff88', MEDIUM:'#ffaa00', HIGH:'#ff6b35', CRITICAL:'#ff2244' }[data.global_label] || '#00d4ff';
+  document.getElementById('fc-risk-score').textContent = Math.round(data.global_risk); document.getElementById('fc-risk-score').style.color = color;
+  document.getElementById('fc-risk-label').textContent = data.global_label; document.getElementById('fc-risk-label').style.color = color;
+  document.getElementById('fc-structural-summary').textContent = data.structural_summary;
+  document.getElementById('fc-hotspots').innerHTML = (data.hotspot_nodes || []).map(n => `<span class="hotspot-badge">${n}</span>`).join('');
+  document.getElementById('forecast-global-summary').style.display = 'block';
+  const pc = p => p >= .7 ? '#ff2244' : p >= .4 ? '#ffaa00' : '#00ff88';
+  document.getElementById('forecast-cards').innerHTML = (data.forecasts || []).map(f => {
+    const fcol = pc(f.probability);
+    const sc = { LOW:'#00ff88', MEDIUM:'#ffaa00', HIGH:'#ff6b35', CRITICAL:'#ff2244' }[f.severity] || '#00d4ff';
+    return `<div class="forecast-card"><div class="forecast-card-header"><span class="forecast-rank">FORECAST #${f.rank}</span><span class="risk-pill" style="background:${sc}22;color:${sc};border:1px solid ${sc}44">${f.severity}</span></div><div class="forecast-title">${f.title}</div><div class="forecast-meta"><span class="fmeta">PROB <span style="color:${fcol}">${(f.probability*100).toFixed(0)}%</span></span><span class="fmeta">TIME <span>${f.timeframe}</span></span><span class="fmeta">ACTORS <span>${(f.actors||[]).join(', ')}</span></span></div><div class="prob-bar"><div class="prob-fill" style="width:${f.probability*100}%;background:${fcol}"></div></div><div class="forecast-signal">◈ ${f.structural_signal}</div><div class="forecast-narrative">${f.narrative}</div><div class="forecast-mitigation">⟁ ${f.mitigation}</div></div>`;
+  }).join('');
+  document.getElementById('forecast-empty').style.display = 'none';
+  document.getElementById('forecast-cards').style.display = 'block';
+}
+
+/* ── QUERY / CHAT ─────────────────────────────────────────────────────────────── */
+function addChatMessage(role, text, time) {
+  const history = document.getElementById('chat-history');
+  const msg = document.createElement('div');
+  msg.className = `chat-msg ${role}`;
+  // Issue-6: escape LLM-derived text before innerHTML injection
+  const bubble = document.createElement('div'); bubble.className = 'chat-bubble';
+  bubble.innerHTML = esc(text).replace(/\n/g,'<br/>');
+  const timeEl = document.createElement('div'); timeEl.className = 'chat-time';
+  timeEl.textContent = time || new Date().toLocaleTimeString();
+  msg.appendChild(bubble); msg.appendChild(timeEl);
+  history.appendChild(msg);
+  history.scrollTop = history.scrollHeight;
+  return msg;
+}
+
+document.getElementById('btn-query').addEventListener('click', sendQuery);
+document.getElementById('chat-input').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendQuery(); } });
+
+async function sendQuery() {
+  const question = document.getElementById('chat-input').value.trim();
+  if (!question) return;
+  const persona = document.getElementById('query-persona').value;
+  document.getElementById('chat-input').value = '';
+  addChatMessage('user', question);
+  setLoading('btn-query', true);
+  const thinking = addChatMessage('assistant', '<span class="thinking-dots">Analyzing graph</span>');
+  try {
+    const data = await API.post('/api/query', { question, model: S.model, persona });
+    thinking.querySelector('.chat-bubble').innerHTML = esc(data.answer).replace(/\n/g,'<br/>');
+    thinking.querySelector('.chat-time').textContent = new Date().toLocaleTimeString();
+    document.getElementById('chat-context-text').textContent = data.context || 'No graph context used.';
+  } catch(e) {
+    thinking.querySelector('.chat-bubble').innerHTML = `<span style="color:var(--red)">Error: ${e.message}</span>`;
+  } finally { setLoading('btn-query', false); }
+}
+
+/* ── ANALYTICS ───────────────────────────────────────────────────────────────── */
+async function renderAnalytics() {
+  try {
+    const data = await API.get('/api/graph');
+    S.analytics = data.analytics;
+    const a = S.analytics;
+    document.getElementById('stat-grid').innerHTML = [
+      { val: a.nodes ?? 0, name: 'ENTITIES' },
+      { val: a.edges ?? 0, name: 'RELATIONSHIPS' },
+      { val: (a.density ?? 0).toFixed(4), name: 'GRAPH DENSITY' },
+      { val: a.weakly_connected_components ?? 0, name: 'CLUSTERS' },
+    ].map(s => `<div class="stat-card"><div class="stat-val">${s.val}</div><div class="stat-name">${s.name}</div></div>`).join('');
+    const health = a.health || {};
+    const score = health.score || 0;
+    const healthCircle = document.getElementById('health-circle');
+    healthCircle.textContent = score;
+    healthCircle.style.background = `conic-gradient(var(--accent) ${score * 3.6}deg, var(--bg-raised) 0)`;
+    document.getElementById('health-suggestions').innerHTML = (health.suggestions || []).map(s => `<div>▸ ${s}</div>`).join('') || '<div style="color:var(--green)">✓ Graph looks healthy</div>';
+    const groups = a.group_counts || {};
+    // Issue-34: update existing charts instead of destroy+recreate (avoids flash + GC churn)
+    const groupLabels = Object.keys(groups);
+    const groupData   = Object.values(groups);
+    const groupColors = groupLabels.map(g => GROUP_COLORS[g] || '#8b949e');
+    if (S.chartGroups) {
+      S.chartGroups.data.labels = groupLabels;
+      S.chartGroups.data.datasets[0].data = groupData;
+      S.chartGroups.data.datasets[0].backgroundColor = groupColors;
+      S.chartGroups.update('none');
+    } else {
+      S.chartGroups = new Chart(document.getElementById('chart-groups'), {
+        type: 'doughnut',
+        data: { labels: groupLabels, datasets: [{ data: groupData, backgroundColor: groupColors, borderWidth: 1, borderColor: 'var(--bg-panel)' }] },
+        options: { plugins: { legend: { labels: { color: 'var(--text-mid)', font: { family: 'JetBrains Mono', size: 11 } } }, title: { display: true, text: 'ENTITY TYPES', color: 'var(--accent)', font: { family: 'Orbitron', size: 11 } } }, cutout: '60%' }
+      });
+    }
+    const topDeg = a.top_degree || [];
+    const degLabels = topDeg.map(([n]) => n.length > 12 ? n.slice(0,12)+'…' : n);
+    const degData   = topDeg.map(([,v]) => v);
+    if (S.chartDegree) {
+      S.chartDegree.data.labels = degLabels;
+      S.chartDegree.data.datasets[0].data = degData;
+      S.chartDegree.update('none');
+    } else {
+      S.chartDegree = new Chart(document.getElementById('chart-degree'), {
+        type: 'bar',
+        data: { labels: degLabels, datasets: [{ label: 'Degree Centrality', data: degData, backgroundColor: '#00d4ff44', borderColor: '#00d4ff', borderWidth: 1 }] },
+        options: { indexAxis: 'y', plugins: { legend: { display: false }, title: { display: true, text: 'TOP ACTORS (DEGREE)', color: 'var(--accent)', font: { family: 'Orbitron', size: 11 } } }, scales: { x: { ticks: { color: 'var(--text-lo)', font: { family: 'JetBrains Mono', size: 10 } }, grid: { color: 'var(--border)' } }, y: { ticks: { color: 'var(--text-mid)', font: { family: 'JetBrains Mono', size: 10 } }, grid: { color: 'var(--border)' } } } }
+      });
+    }
+    const conflicts = a.conflicts || [];
+    document.getElementById('conflicts-list').innerHTML = conflicts.length
+      ? conflicts.map(c => `<div class="conflict-item"><div class="conflict-header">⚠ CONTRADICTION — ${c.nodes.map(esc).join(' ↔ ')}</div><div style="font-size:12px;color:var(--text-mid)">Hostile: <i>${esc(c.hostile_edge?.label||'')}</i> · Cooperative: <i>${esc(c.cooperative_edge?.label||'')}</i></div></div>`).join('')
+      : '<div class="empty-state" style="padding:16px"><div class="empty-icon">✓</div>No contradictions detected</div>';
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+/* ── TIMELINE ─────────────────────────────────────────────────────────────────── */
+async function loadTimeline() {
+  try {
+    const data = await API.get('/api/snapshots/timeline');
+    const items = document.getElementById('snapshot-items');
+    if (!data.timeline?.length) { items.innerHTML = '<div class="empty-state"><div class="empty-icon">⊡</div>No snapshots yet<br/>Snapshots are created automatically on each extraction</div>'; return; }
+    items.innerHTML = data.timeline.slice().reverse().map(s => `<div class="snapshot-item" data-snapshot-id="${esc(s.id)}" onclick="loadSnapshot(this.dataset.snapshotId, this)">${esc(s.date.replace('T',' ').replace('Z',''))}</div>`).join('');
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function loadSnapshot(snapshotId, el) {
+  document.querySelectorAll('.snapshot-item').forEach(e => e.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('snapshot-empty').style.display = 'none';
+  try {
+    const data = await API.get(`/api/snapshots/${snapshotId}`);
+    const container = document.getElementById('snapshot-canvas');
+    container.style.width = '100%'; container.style.height = '100%';
+    const nodes = new vis.DataSet(data.vis.nodes || []);
+    const edges = new vis.DataSet(data.vis.edges || []);
+    if (S.snapshotNetwork) S.snapshotNetwork.setData({ nodes, edges });
+    else { S.snapshotNetwork = new vis.Network(container, { nodes, edges }, { nodes: { shape:'dot', size:14, font:{ color:'#e2ecf8', size:12, face:'Rajdhani' } }, edges: { arrows:'to', smooth:{type:'continuous'}, color:{ color:'#1e3a5f', highlight:'#00e5ff' } }, physics: { barnesHut: { gravitationalConstant:-8000 } } }); container.style.background = 'var(--bg-void)'; }
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+/* ── REPORT ──────────────────────────────────────────────────────────────────── */
+function renderEntityChecklist() {
+  const list = document.getElementById('entity-checklist');
+  const nodes = S.graph.nodes || [];
+  if (!nodes.length) { list.innerHTML = '<div class="text-lo mono" style="font-size:11px">No entities in graph. Ingest data first.</div>'; return; }
+  list.innerHTML = nodes.map(n => `<label class="entity-check-item"><input type="checkbox" value="${n.id}" checked/><span style="color:${GROUP_COLORS[n.group]||'#8b949e'};font-family:var(--font-mono);font-size:10px">${(n.group||'?').toUpperCase()}</span><span>${n.id}</span></label>`).join('');
+}
+
+document.getElementById('btn-report').addEventListener('click', async () => {
+  const checked = [...document.querySelectorAll('#entity-checklist input:checked')].map(e => e.value);
+  const format = document.getElementById('report-format').value;
+  setLoading('btn-report', true);
+  try {
+    const resp = await fetch('/api/report', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ entities: checked, format, model: S.model }) });
+    if (!resp.ok) throw new Error((await resp.json()).detail);
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = `goies_brief.${format === 'md' ? 'md' : 'pdf'}`; a.click(); URL.revokeObjectURL(url);
+    if (format === 'md') { const text = await blob.text(); document.getElementById('report-preview').textContent = text.slice(0, 4000) + (text.length > 4000 ? '\n...' : ''); }
+    else { document.getElementById('report-preview').textContent = 'PDF generated and downloaded.'; }
+    toast('Report generated', 'success');
+  } catch(e) { toast(`Report error: ${e.message}`, 'error'); }
+  finally { setLoading('btn-report', false); }
+});
+
+['json','csv','graphml'].forEach(fmt => {
+  document.getElementById(`btn-export-${fmt}`).addEventListener('click', () => {
+    const a = document.createElement('a'); a.href = `/api/export/${fmt}`; a.download = `goies_graph.${fmt}`; a.click();
+  });
+});
+
+/* ── GQL ─────────────────────────────────────────────────────────────────────── */
+const GQL_QUICK = ['find countries','find persons','find organizations','top 5 nodes by degree','top 5 nodes by betweenness','isolated nodes','hub nodes','nodes with degree > 3','edges label contains sanction','nodes with confidence < 0.8','count all'];
+// Issue-33: persist GQL history across page reloads
+const gqlHistory = (() => {
+  try { return JSON.parse(localStorage.getItem('goies_gql_history') || '[]'); } catch { return []; }
+})();
+function _saveGqlHistory() {
+  try { localStorage.setItem('goies_gql_history', JSON.stringify(gqlHistory.slice(0,20))); } catch {}
+}
+
+function initGQL() {
+  const chips = document.getElementById('gql-quick-chips');
+  if (chips.children.length) return;
+  GQL_QUICK.forEach(q => {
+    const chip = document.createElement('div'); chip.className = 'gql-chip'; chip.textContent = q;
+    chip.onclick = () => { document.getElementById('gql-input').value = q; execGQL(); };
+    chips.appendChild(chip);
+  });
+}
+
+document.getElementById('btn-gql').addEventListener('click', execGQL);
+document.getElementById('gql-input').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); execGQL(); } });
+document.getElementById('btn-gql-help').addEventListener('click', async () => {
+  const data = await API.get('/api/gql/help').catch(() => null); if (!data) return;
+  document.getElementById('gql-result-empty').style.display = 'none'; document.getElementById('gql-result').style.display = 'block';
+  document.getElementById('gql-result-query').textContent = 'help'; document.getElementById('gql-result-count').textContent = '';
+  document.getElementById('gql-result-body').innerHTML = `<div class="gql-help-text">${data.help}</div>`;
+});
+
+async function execGQL() {
+  const query = document.getElementById('gql-input').value.trim();
+  if (!query) return;
+  setLoading('btn-gql', true);
+  try {
+    const data = await API.post('/api/gql', { query });
+    renderGQLResult(data);
+    if (!gqlHistory.includes(query)) { gqlHistory.unshift(query); if (gqlHistory.length > 20) gqlHistory.pop(); _saveGqlHistory(); }
+    renderGQLHistory();
+  } catch(e) { toast(`GQL error: ${e.message}`, 'error'); }
+  finally { setLoading('btn-gql', false); }
+}
+
+function renderGQLHistory() {
+  // Issue-14: store query in data attribute — inline replacement only escaped apostrophes
+  window._gqlHistoryCache = gqlHistory.slice(0,8);
+  document.getElementById('gql-history').innerHTML = window._gqlHistoryCache.map((q,i) => `<div class="gql-history-item" data-gql-idx="${i}" onclick="document.getElementById('gql-input').value=window._gqlHistoryCache[+this.dataset.gqlIdx];execGQL()">${esc(q)}</div>`).join('');
+}
+
+function renderGQLResult(data) {
+  document.getElementById('gql-result-empty').style.display = 'none'; document.getElementById('gql-result').style.display = 'block';
+  document.getElementById('gql-result-query').textContent = data.query || '';
+  const body = document.getElementById('gql-result-body');
+  const count = data.count ?? (data.result?.length ?? '');
+  document.getElementById('gql-result-count').textContent = count !== '' ? `${count} result${count!==1?'s':''}` : '';
+  // FIX: Truncation warning when result set was capped at GQL_DEFAULT_LIMIT
+  const truncWarning = data.truncated
+    ? `<div style="font-family:var(--font-mono);font-size:10px;color:var(--amber);padding:6px 10px;background:var(--amber-dim);border-radius:var(--radius);margin-bottom:8px">⚠ Results capped at ${data.truncated_at||200} rows. Use <code>top N nodes by degree</code> or a more specific query.</div>`
+    : '';
+  if (data.type === 'error') { body.innerHTML = truncWarning + `<div class="card" style="border-color:var(--red)"><span style="color:var(--red)">✗ ${data.error}</span></div>`; return; }
+  if (data.type === 'count') { body.innerHTML = truncWarning + `<div class="card"><div style="font-family:var(--font-display);font-size:42px;font-weight:900;color:var(--accent);text-align:center">${data.count}</div><div style="text-align:center;font-family:var(--font-mono);font-size:11px;color:var(--text-lo);margin-top:4px">${(data.group||'').toUpperCase()} ENTITIES</div></div>`; return; }
+  if (data.type === 'path') { body.innerHTML = truncWarning + renderGQLPath(data) + renderGQLTable(data.edges || [], ['from','label','to']); return; }
+  if (data.type === 'nodes') { const r = data.result || []; if (!r.length) { body.innerHTML = truncWarning + '<div class="empty-state"><div class="empty-icon">◎</div>No matching nodes</div>'; return; } body.innerHTML = truncWarning + renderGQLTable(r, Object.keys(r[0])); return; }
+  if (data.type === 'edges') { const r = data.result || []; if (!r.length) { body.innerHTML = truncWarning + '<div class="empty-state"><div class="empty-icon">◎</div>No matching edges</div>'; return; } body.innerHTML = truncWarning + renderGQLTable(r, ['from','label','to','confidence']); return; }
+  body.innerHTML = truncWarning + `<pre style="font-family:var(--font-mono);font-size:11px;color:var(--text-mid)">${JSON.stringify(data,null,2)}</pre>`;
+}
+
+function renderGQLPath(data) {
+  if (!data.nodes?.length) return '<div class="text-red">No path found</div>';
+  const parts = [data.nodes[0]];
+  (data.edges || []).forEach(e => { if (e.label) parts.push(`[${e.label}]`); parts.push(e.to); });
+  return `<div class="gql-path-vis">${parts.map((p,i) => p.startsWith('[') ? `<span class="gql-path-edge">${esc(p)}</span>` : i===0||i===parts.length-1 ? `<span class="gql-path-node" style="border-color:var(--green)">${esc(p)}</span>` : `<span class="gql-path-node">${esc(p)}</span>`).join('<span class="gql-path-arrow"> → </span>')}</div><div style="font-family:var(--font-mono);font-size:10px;color:var(--text-lo);margin-top:6px">${data.length} hop${data.length!==1?'s':''} · ${data.directed?'directed':'undirected'}</div>`;
+}
+
+function renderGQLTable(rows, cols) {
+  if (!rows.length) return '<div class="empty-state"><div class="empty-icon">◎</div>No results</div>';
+  const vc = cols.filter(c => rows[0][c] !== undefined);
+  return `<div style="overflow-x:auto"><table class="gql-result-table"><thead><tr>${vc.map(c => `<th>${esc(c.toUpperCase())}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${vc.map(c => { const v = r[c]; if (c==='group') return `<td><span style="color:${GROUP_COLORS[v]||'#8b949e'};font-family:var(--font-mono);font-size:10px">${esc((v||'').toUpperCase())}</span></td>`; if (c==='confidence'&&typeof v==='number') return `<td style="color:${v>.8?'var(--green)':v>.5?'var(--amber)':'var(--red)'}">${(v*100).toFixed(0)}%</td>`; if (c==='label') return `<td style="color:var(--purple);font-style:italic">${esc(String(v||''))}</td>`; return `<td>${esc(String(v??''))}</td>`; }).join('')}</tr>`).join('')}</tbody></table></div>`;
+}
+
+/* ── EMBEDDING ENGINE ─────────────────────────────────────────────────────────── */
+const CLUSTER_COLORS = ['#00d4ff','#ff7b72','#d2a8ff','#7ee787','#ffa657','#79c0ff','#f0e68c','#56d364'];
+
+async function refreshEmbedStatus() {
+  try {
+    const data = await API.get('/api/embed/status');
+    document.getElementById('embed-trained-lbl').textContent = data.trained ? 'TRAINED' : 'UNTRAINED';
+    document.getElementById('embed-trained-lbl').style.color = data.trained ? 'var(--green)' : 'var(--red)';
+    document.getElementById('embed-n-nodes').textContent = data.nodes_embedded || '—';
+    document.getElementById('embed-dims').textContent = data.dimensions || '64';
+    document.getElementById('embed-trained-at').textContent = data.trained_at ? new Date(data.trained_at).toLocaleString() : '—';
+  } catch {}
+}
+
+document.getElementById('btn-embed-train').addEventListener('click', async () => {
+  setLoading('btn-embed-train', true);
+  try {
+    const data = await API.post('/api/embed/train', {});
+    toast(`Embeddings trained: ${data.nodes_embedded} nodes`, 'success');
+    refreshEmbedStatus();
+    document.getElementById('embed-result-empty').style.display = 'none'; document.getElementById('embed-result').style.display = 'block';
+    document.getElementById('embed-result-title').textContent = 'TRAINING COMPLETE';
+    document.getElementById('embed-result-body').innerHTML = `<div class="card"><div style="font-family:var(--font-display);font-size:32px;font-weight:900;color:var(--accent)">${data.nodes_embedded}</div><div style="font-family:var(--font-mono);font-size:10px;color:var(--text-lo)">NODES EMBEDDED</div></div>`;
+  } catch(e) { toast(`Training failed: ${e.message}`, 'error'); }
+  finally { setLoading('btn-embed-train', false); }
+});
+
+document.getElementById('btn-embed-similar').addEventListener('click', async () => {
+  const node = document.getElementById('embed-node-input').value.trim(); if (!node) return;
+  try { const data = await API.get(`/api/embed/similar/${encodeURIComponent(node)}`); renderEmbedSimilar(`SIMILAR TO: ${data.node}`, data.similar); } catch(e) { toast(e.message,'error'); }
+});
+
+document.getElementById('btn-embed-search').addEventListener('click', async () => {
+  const q = document.getElementById('embed-search-input').value.trim(); if (!q) return;
+  try { const data = await API.get(`/api/embed/search?q=${encodeURIComponent(q)}`); renderEmbedSimilar(`SEARCH: "${q}"`, data.results); } catch(e) { toast(e.message,'error'); }
+});
+
+function renderEmbedSimilar(title, items) {
+  document.getElementById('embed-result-empty').style.display = 'none'; document.getElementById('embed-result').style.display = 'block';
+  document.getElementById('embed-result-title').textContent = title;
+  if (!items?.length) { document.getElementById('embed-result-body').innerHTML = '<div class="empty-state"><div class="empty-icon">⊕</div>No results found</div>'; return; }
+  document.getElementById('embed-result-body').innerHTML = items.map(item => {
+    const nd = (S.graph.nodes || []).find(n => n.id === item.id) || {};
+    const color = GROUP_COLORS[nd.group] || '#8b949e';
+    const pct = Math.round(item.score * 100);
+    return `<div class="similar-node-item" data-node-id="${esc(item.id)}" onclick="document.getElementById('node-search').value=this.dataset.nodeId;document.querySelector('[data-tab=graph]').click()"><div><div class="similar-node-name">${esc(item.id)}</div><div style="color:${color};font-family:var(--font-mono);font-size:10px">${esc((nd.group||'unknown').toUpperCase())}</div></div><div style="text-align:right"><div class="similar-node-score">${pct}%</div><div class="sim-bar" style="width:60px"><div class="sim-bar-fill" style="width:${pct}%"></div></div></div></div>`;
+  }).join('');
+}
+
+document.getElementById('btn-embed-cluster').addEventListener('click', async () => {
+  const k = parseInt(document.getElementById('embed-k-input').value) || 5;
+  try {
+    const data = await API.get(`/api/embed/clusters?n=${k}`);
+    const clusters = data.clusters; if (!Object.keys(clusters).length) { toast('No clusters returned','warn'); return; }
+    document.getElementById('embed-result-empty').style.display = 'none'; document.getElementById('embed-result').style.display = 'block';
+    document.getElementById('embed-result-title').textContent = `${k} CLUSTERS`;
+    const byC = {}; Object.entries(clusters).forEach(([node,cid]) => { if (!byC[cid]) byC[cid] = []; byC[cid].push(node); });
+    document.getElementById('embed-result-body').innerHTML = Object.entries(byC).map(([cid,nodes]) => { const color = CLUSTER_COLORS[cid%CLUSTER_COLORS.length]; return `<div class="card" style="margin-bottom:8px"><div style="font-family:var(--font-mono);font-size:10px;color:${color};margin-bottom:8px">CLUSTER ${parseInt(cid)+1} · ${nodes.length} nodes</div>${nodes.map(n => `<span class="cluster-node" style="background:${color}22;border:1px solid ${color}44;color:${color}">${n}</span>`).join('')}</div>`; }).join('');
+    toast(`Clustered into ${k} groups`, 'success');
+  } catch(e) { toast(e.message,'error'); }
+});
+
+/* ── OSINT ENGINE ────────────────────────────────────────────────────────────────────────────── */
+
+/* Continuous loop client state */
+const CL = {
+  active: false,
+  cycle: 0,
+  intervalSecs: 300,
+  cycleStartedAt: null,  // epoch ms when current cycle sleep started
+  pollTimer: null,
+  progressTimer: null,
+};
+
+/* ── Toggle Button ── */
+document.getElementById('btn-continuous-toggle').addEventListener('click', async () => {
+  if (!CL.active) {
+    await startContinuousLoop();
+  } else {
+    await stopContinuousLoop();
+  }
+});
+
+async function startContinuousLoop() {
+  const interval = parseInt(document.getElementById('cont-interval').value) || 300;
+  const limit    = parseInt(document.getElementById('cont-art-limit').value) || 5;
+  try {
+    await API.post('/api/osint/continuous/start', {
+      interval_secs: interval, articles_per_feed: limit, model: S.model
+    });
+    CL.active = true;
+    CL.intervalSecs = interval;
+    CL.cycleStartedAt = Date.now();
+    setContinuousUI(true);
+    toast('Continuous intelligence loop activated', 'success');
+    pollContinuousStatus();
+    startProgressBar();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function stopContinuousLoop() {
+  try {
+    await API.post('/api/osint/continuous/stop', {});
+    CL.active = false;
+    if (CL.pollTimer)     { clearTimeout(CL.pollTimer);     CL.pollTimer = null; }
+    if (CL.progressTimer) { clearInterval(CL.progressTimer); CL.progressTimer = null; }
+    setContinuousUI(false);
+    toast('Loop stopped — final cycle completed', 'info');
+    await refreshContinuousStatus();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+function setContinuousUI(active) {
+  const btn = document.getElementById('btn-continuous-toggle');
+  const liveBar = document.getElementById('continuous-live-bar');
+  const progressWrap = document.getElementById('cycle-progress-wrap');
+  if (active) {
+    btn.className = 'active';
+    document.getElementById('continuous-btn-icon').textContent = '■';
+    document.getElementById('continuous-btn-label').textContent = 'STOP LOOP';
+    liveBar.classList.add('visible');
+    progressWrap.classList.add('visible');
+    document.getElementById('continuous-total-stats').classList.add('visible');
+  } else {
+    btn.className = 'inactive';
+    document.getElementById('continuous-btn-icon').textContent = '▶';
+    document.getElementById('continuous-btn-label').textContent = 'ACTIVATE LOOP';
+    liveBar.classList.remove('visible');
+    progressWrap.classList.remove('visible');
+    document.getElementById('cycle-progress-fill').style.width = '0%';
+  }
+}
+
+/* ── Progress bar (counts down to next cycle) ── */
+function startProgressBar() {
+  if (CL.progressTimer) clearInterval(CL.progressTimer);
+  CL.cycleStartedAt = Date.now();
+  CL.progressTimer = setInterval(() => {
+    if (!CL.active) { clearInterval(CL.progressTimer); return; }
+    const elapsed = (Date.now() - CL.cycleStartedAt) / 1000;
+    const pct = Math.min(100, (elapsed / CL.intervalSecs) * 100);
+    const remaining = Math.max(0, CL.intervalSecs - elapsed);
+    document.getElementById('cycle-progress-fill').style.width = pct + '%';
+    const mins = Math.floor(remaining / 60);
+    const secs = Math.floor(remaining % 60);
+    document.getElementById('progress-time-label').textContent =
+      mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+    document.getElementById('continuous-next-in').textContent =
+      `next in ${mins > 0 ? `${mins}m ${secs}s` : `${secs}s`}`;
+  }, 1000);
+}
+
+/* ── Polling: fetch continuous status from backend ── */
+async function pollContinuousStatus() {
+  if (!CL.active) return;
+  await refreshContinuousStatus();
+  CL.pollTimer = setTimeout(pollContinuousStatus, 5000);
+}
+
+async function refreshContinuousStatus() {
+  try {
+    const data = await API.get('/api/osint/continuous/status');
+
+    // Sync active state in case server stopped the loop
+    if (CL.active && !data.active) {
+      CL.active = false;
+      setContinuousUI(false);
+      if (CL.progressTimer) { clearInterval(CL.progressTimer); CL.progressTimer = null; }
     }
 
-
-# ── Request models ────────────────────────────────────────────────────────────
-
-
-class ExtractRequest(BaseModel):
-    text: str = Field(..., min_length=1)
-    model: str = DEFAULT_MODEL
-    persona: str = "senior geopolitical intelligence analyst"
-
-
-class ExtractResponse(BaseModel):
-    task_id: str
-    entities: list[dict]
-    relationships: list[dict]
-    elapsed: float
-    chunks: int
-
-
-class GraphClearResponse(BaseModel):
-    cleared: bool
-    message: str
-
-
-class QueryRequest(BaseModel):
-    question: str
-    model: str = DEFAULT_MODEL
-    persona: str = "senior geopolitical intelligence analyst"
-
-
-class SimulateRequest(BaseModel):
-    scenario: str
-    model: str = DEFAULT_MODEL
-
-
-class ForecastRequest(BaseModel):
-    model: str = DEFAULT_MODEL
-    focus: str = ""
-
-
-class UrlIngestRequest(BaseModel):
-    url: str
-
-
-class ReportRequest(BaseModel):
-    entities: List[str] = []
-    format: str = "pdf"
-    model: str = DEFAULT_MODEL
-
-
-class WatchListRequest(BaseModel):
-    thresholds: Dict[str, float]
-
-
-class ExtractUrlRequest(BaseModel):
-    url: str
-    model: str = DEFAULT_MODEL
-    persona: str = "senior geopolitical intelligence analyst"
-
-
-class MergeRequest(BaseModel):
-    source: str
-    target: str
-
-
-class GQLRequest(BaseModel):
-    query: str
-
-
-class FeedRequest(BaseModel):
-    url: str
-    name: str = ""
-
-
-class OsintIngestRequest(BaseModel):
-    model: str = DEFAULT_MODEL
-    articles_per_feed: int = 5
-
-
-class ContinuousStartRequest(BaseModel):
-    interval_secs: int = 300
-    articles_per_feed: int = 5
-    model: str = DEFAULT_MODEL
-
-
-# ── Health ────────────────────────────────────────────────────────────────────
-
-
-@app.get("/api/health")
-def health():
-    return check_ollama_health()
-
-
-@app.get("/api/models")
-def models():
-    return {"models": list_available_models()}
-
-
-# ── SSRF guard ────────────────────────────────────────────────────────────────
-
-
-def _validate_url(url: str) -> None:
-    import ipaddress, urllib.parse
-
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise HTTPException(400, f"Unsupported URL scheme '{parsed.scheme}'.")
-    host = parsed.hostname or ""
-    try:
-        addr = ipaddress.ip_address(host)
-        if (
-            addr.is_private
-            or addr.is_loopback
-            or addr.is_link_local
-            or addr.is_reserved
-        ):
-            raise HTTPException(
-                400, "Requests to private/loopback addresses are not allowed."
-            )
-    except ValueError:
-        pass
-    blocked = ("localhost", "metadata.google.internal")
-    if any(host.lower() == b or host.lower().endswith("." + b) for b in blocked):
-        raise HTTPException(400, "Requests to reserved hostnames are not allowed.")
-
-
-# ── Ingestion ─────────────────────────────────────────────────────────────────
-
-
-@app.post("/api/ingest/url/fetch")
-def ingest_url_fetch(req: UrlIngestRequest, request: Request):
-    _check_rate(request, max_req=30, window=60)
-    _validate_url(req.url)
-    try:
-        from ingestor import fetch_url_text
-
-        text = fetch_url_text(req.url)
-        return {"text": text, "chars": len(text)}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(400, str(exc))
-
-
-@app.post("/api/extract/url")
-def extract_url_stream(req: ExtractUrlRequest, request: Request):
-    _check_rate(request, max_req=10, window=60)
-    _validate_url(req.url)
-
-    def event_generator():
-        try:
-            from ingestor import fetch_url_text
-
-            text = fetch_url_text(req.url)
-        except Exception as exc:
-            yield f"data: {json.dumps({'error': f'Fetch failed: {exc}'})}\n\n"
-            return
-        if not text.strip():
-            yield f"data: {json.dumps({'error': 'No text extracted from URL'})}\n\n"
-            return
-        yield f"data: {json.dumps({'fetched': True, 'chars': len(text), 'url': req.url})}\n\n"
-        # Run async extraction from sync context via a new event loop
-        import asyncio as _aio
-
-        cancel = CancelToken()
-        loop = _aio.new_event_loop()
-        try:
-            ents, rels = loop.run_until_complete(
-                extract_text(
-                    text,
-                    model=req.model,
-                    cancel=cancel,
-                    on_chunk=lambda r: _apply_chunk(r),
-                )
-            )
-        except Exception as exc:
-            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
-            return
-        finally:
-            loop.close()
-        save_graph(graph)
-        yield f"data: {json.dumps({'done': True, 'totals': {'entities': len(ents), 'relations': len(rels)}})}\n\n"
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-
-@app.post("/api/ingest/file")
-async def ingest_file(request: Request, file: UploadFile = File(...)):
-    _check_rate(request, max_req=20, window=60)
-    content_length = request.headers.get("content-length")
-    try:
-        _cl_int = int(content_length) if content_length else 0
-    except (ValueError, TypeError):
-        _cl_int = 0
-    if _cl_int > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            413, f"File too large. Max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB."
-        )
-
-    from ingestor import parse_pdf, parse_docx
-
-    content = await file.read(MAX_UPLOAD_BYTES + 1)
-    if len(content) > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            413, f"File too large. Max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB."
-        )
-
-    filename = (file.filename or "").lower()
-    try:
-        if filename.endswith(".pdf"):
-            text = parse_pdf(content)
-        elif filename.endswith(".docx"):
-            text = parse_docx(content)
-        elif filename.endswith((".txt", ".md")):
-            text = content.decode("utf-8", errors="ignore")
-        else:
-            raise HTTPException(
-                400, "Unsupported format. Upload PDF, DOCX, TXT, or MD."
-            )
-        return {"text": text, "filename": filename}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(500, f"Error parsing file: {exc}")
-
-
-# ── Extraction (ASYNC-1 #3 #7) ────────────────────────────────────────────────
-
-
-@app.post("/api/extract", response_model=ExtractResponse)
-async def extract(req: ExtractRequest, request: Request) -> ExtractResponse:
-    _check_rate(request, max_req=10, window=60)
-    if not req.text.strip():
-        raise HTTPException(400, "Text cannot be empty.")
-    if len(req.text) > MAX_INPUT_CHARS:
-        raise HTTPException(400, f"Input exceeds {MAX_INPUT_CHARS:,} chars.")
-
-    task_id = str(uuid.uuid4())
-    cancel = CancelToken()
-    _active_tasks[task_id] = cancel
-    t0 = time.perf_counter()
-    chunks_processed = [0]
-
-    def on_chunk(result: ChunkResult) -> None:
-        _apply_chunk(result)
-        chunks_processed[0] += 1
-
-    try:
-        entities, relationships = await extract_text(
-            req.text, req.model, cancel, on_chunk=on_chunk
-        )
-    except asyncio.CancelledError:
-        raise HTTPException(409, "Extraction cancelled.")
-    except ConnectionError as exc:
-        raise HTTPException(503, str(exc))
-    except TimeoutError as exc:
-        raise HTTPException(504, str(exc))
-    finally:
-        _active_tasks.pop(task_id, None)
-
-    save_graph(graph)
-
-    return ExtractResponse(
-        task_id=task_id,
-        entities=[
-            {
-                "id": e.id,
-                "group": e.group,
-                "confidence": e.confidence,
-                "attributes": e.attributes,
-            }
-            for e in entities
-        ],
-        relationships=[
-            {
-                "from": r.from_id,
-                "to": r.to_id,
-                "label": r.label,
-                "confidence": r.confidence,
-            }
-            for r in relationships
-        ],
-        elapsed=round(time.perf_counter() - t0, 2),
-        chunks=chunks_processed[0],
-    )
-
-
-@app.delete("/api/extract/{task_id}", status_code=200)
-async def cancel_extraction(task_id: str) -> dict:
-    """ASYNC-3: Cancel an in-flight extraction by task_id."""
-    token = _active_tasks.get(task_id)
-    if not token:
-        raise HTTPException(404, f"No active task with id={task_id}")
-    token.cancel()
-    return {"cancelled": True, "task_id": task_id}
-
-
-@app.post("/api/extract/stream")
-async def extract_stream_endpoint(
-    req: ExtractRequest, request: Request
-) -> StreamingResponse:
-    """ASYNC-7: SSE stream — yields incremental per-chunk graph updates."""
-    _check_rate(request, max_req=10, window=60)
-    if not req.text.strip():
-        raise HTTPException(400, "Text cannot be empty.")
-    if len(req.text) > MAX_INPUT_CHARS:
-        raise HTTPException(400, f"Input exceeds {MAX_INPUT_CHARS:,} chars.")
-
-    task_id = str(uuid.uuid4())
-    cancel = CancelToken()
-    _active_tasks[task_id] = cancel
-
-    all_known_node_ids: set = {n for n in graph.nodes()}
-
-    async def event_generator() -> AsyncIterator[str]:
-        total_entities, total_relations = 0, 0
-        try:
-            async for event in extract_stream(req.text, req.model, cancel):
-                if event.get("type") == "chunk":
-                    result = ChunkResult(
-                        entities=[
-                            Entity(
-                                id=e["id"],
-                                group=e.get("group", "unknown"),
-                                confidence=e.get("confidence", 1.0),
-                                attributes=e.get("attributes", {}),
-                            )
-                            for e in event.get("new_entities", [])
-                        ],
-                        relationships=[
-                            Relationship(
-                                from_id=r["from"],
-                                to_id=r["to"],
-                                label=r.get("label", "related"),
-                                confidence=r.get("confidence", 1.0),
-                            )
-                            for r in event.get("new_relationships", [])
-                        ],
-                        chunk_index=event.get("chunk_index", 0),
-                        elapsed=event.get("elapsed", 0.0),
-                    )
-                    _apply_chunk(result)
-
-                    new_node_ids = [
-                        e["id"]
-                        for e in event.get("new_entities", [])
-                        if e["id"] not in all_known_node_ids
-                    ]
-                    new_vis: Optional[dict] = None
-                    if new_node_ids:
-                        vis_full = graph_to_vis(graph)
-                        new_vis = {
-                            "nodes": [
-                                n for n in vis_full["nodes"] if n["id"] in new_node_ids
-                            ],
-                            "edges": [
-                                e
-                                for e in vis_full["edges"]
-                                if e["from"] in new_node_ids or e["to"] in new_node_ids
-                            ],
-                        }
-                        all_known_node_ids.update(new_node_ids)
-
-                    totals = event.get("totals", {})
-                    total_entities = totals.get("entities", total_entities)
-                    total_relations = totals.get("relationships", total_relations)
-                    payload = {
-                        "chunk": event.get("chunk_index"),
-                        "total_chunks": totals.get("chunks_total"),
-                        "entities": len(event.get("new_entities", [])),
-                        "relations": len(event.get("new_relationships", [])),
-                        "new_node_ids": new_node_ids,
-                        "task_id": task_id,
-                    }
-                    if new_vis:
-                        payload["vis_delta"] = new_vis
-
-                elif event.get("type") == "done":
-                    save_graph(graph)
-                    payload = {
-                        "done": True,
-                        "task_id": task_id,
-                        "totals": {
-                            "entities": total_entities,
-                            "relations": total_relations,
-                        },
-                        "vis": graph_to_vis(graph),
-                        "analytics": get_graph_analytics(graph, watch_list_thresholds),
-                    }
-
-                elif event.get("type") == "error":
-                    payload = {"error": event.get("message"), "task_id": task_id}
-
-                else:
-                    payload = {**event, "task_id": task_id}
-
-                yield f"data: {json.dumps(payload)}\n\n"
-
-        except asyncio.CancelledError:
-            yield f"data: {json.dumps({'cancelled': True, 'task_id': task_id})}\n\n"
-        except Exception as exc:
-            yield f"data: {json.dumps({'error': str(exc), 'task_id': task_id})}\n\n"
-        finally:
-            _active_tasks.pop(task_id, None)
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "X-Task-Id": task_id,
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-# ── Seen cache reset (FIX-17) ─────────────────────────────────────────────────
-
-
-@app.delete("/api/extract/seen")
-def clear_seen_cache():
-    from extractor import _seen_lock, _global_seen, SEEN_FILE, _save_seen
-
-    with _seen_lock:
-        count = len(_global_seen)
-        _global_seen.clear()
-        try:
-            if SEEN_FILE.exists():
-                SEEN_FILE.unlink()
-        except OSError as exc:
-            logger.warning("Could not delete seen cache file: %s", exc)
-    logger.info("Seen cache cleared (%d entries removed).", count)
-    return {"status": "cleared", "entries_removed": count}
-
-
-# ── Graph (ASYNC-4) ───────────────────────────────────────────────────────────
-
-
-@app.get("/api/graph")
-def get_graph_ep(ego: Optional[str] = None, hops: int = 2):
-    hops = max(1, min(hops, 4))
-    g = get_ego_subgraph(graph, ego, hops) if ego and ego in graph else graph
-    return {
-        "vis": graph_to_vis(g),
-        "analytics": get_graph_analytics(graph, watch_list_thresholds),
-        "filtered": ego is not None and ego in graph,
+    // Update cycle counter
+    if (data.cycle !== CL.cycle) {
+      CL.cycle = data.cycle;
+      CL.cycleStartedAt = Date.now(); // reset progress bar on new cycle
+      if (CL.active) startProgressBar();
     }
+    document.getElementById('continuous-cycle-count').textContent = data.cycle;
 
+    // Cumulative session stats
+    document.getElementById('continuous-total-stats').innerHTML = [
+      {val: data.cycle,            lbl: 'CYCLES'},
+      {val: data.total_articles,   lbl: 'ARTICLES'},
+      {val: data.total_entities,   lbl: 'ENTITIES'},
+      {val: `${data.graph_nodes}N ${data.graph_edges}E`, lbl: 'GRAPH'},
+    ].map(s => `<div class="stat-card" style="padding:10px"><div class="stat-val" style="font-size:18px">${s.val}</div><div class="stat-name">${s.lbl}</div></div>`).join('');
 
-@app.delete("/api/graph", response_model=GraphClearResponse)
-def clear_graph_ep():
-    """ASYNC-4: Wipes both the in-memory graph AND persists the empty state."""
-    with _graph_lock:
-        graph.clear()
-    save_graph(graph)
-    logger.info("Graph cleared and persisted.")
-    return GraphClearResponse(
-        cleared=True,
-        message="Graph cleared — backend state reset and persisted to disk.",
-    )
+    // Render cycle log
+    renderCycleLog(data.cycle_log || []);
 
-
-@app.get("/api/path")
-def path(src: str, tgt: str, request: Request):
-    _check_rate(request, max_req=30, window=60)
-    from graph_algo import find_shortest_path
-
-    src_c = resolve_node_name(graph, src)
-    tgt_c = resolve_node_name(graph, tgt)
-    if not graph.has_node(src_c) or not graph.has_node(tgt_c):
-        raise HTTPException(404, "One or both nodes not found.")
-    path_data = find_shortest_path(graph, src_c, tgt_c)
-    if not path_data["nodes"]:
-        return {"found": False, "nodes": [], "edges": []}
-    return {"found": True, "nodes": path_data["nodes"], "edges": path_data["edges"]}
-
-
-@app.post("/api/node/merge")
-def merge_node_ep(req: MergeRequest, request: Request):
-    _check_rate(request, max_req=20, window=60)
-    src_c = resolve_node_name(graph, req.source)
-    tgt_c = resolve_node_name(graph, req.target)
-    if src_c == tgt_c:
-        raise HTTPException(400, "Source and target resolve to the same node.")
-    success = merge_nodes(graph, src_c, tgt_c)
-    if not success:
-        raise HTTPException(400, "Failed to merge. Ensure both nodes exist.")
-    save_graph(graph)
-    return {"status": "success", "merged": src_c, "into": tgt_c}
-
-
-@app.get("/api/export/{fmt}")
-def export(fmt: str):
-    if fmt == "json":
-        return StreamingResponse(
-            io.StringIO(export_json(graph)),
-            media_type="application/json",
-            headers={"Content-Disposition": "attachment; filename=goies_graph.json"},
-        )
-    elif fmt == "csv":
-        return StreamingResponse(
-            io.StringIO(export_csv(graph)),
-            media_type="text/csv",
-            headers={"Content-Disposition": "attachment; filename=goies_edges.csv"},
-        )
-    elif fmt == "graphml":
-        return StreamingResponse(
-            io.BytesIO(export_graphml(graph)),
-            media_type="application/xml",
-            headers={"Content-Disposition": "attachment; filename=goies_graph.graphml"},
-        )
-    raise HTTPException(400, f"Unknown format: {fmt}")
-
-
-# ── Geo ───────────────────────────────────────────────────────────────────────
-
-
-@app.get("/api/geo")
-def get_geo():
-    markers = get_geo_data(graph)
-    return {"markers": markers, "total": len(markers)}
-
-
-# ── Narrative summary ─────────────────────────────────────────────────────────
-
-
-@app.get("/api/narrative/summary")
-def graph_summary(request: Request, model: str = DEFAULT_MODEL):
-    _check_rate(request, max_req=5, window=60)
-    analytics = get_graph_analytics(graph, watch_list_thresholds)
-    edge_sample = [
-        f"{u} -> {v} [{d.get('label', '')}]"
-        for u, v, d in itertools.islice(graph.edges(data=True), 25)
-    ]
-    prompt = (
-        "You are a senior intelligence analyst. Describe the following geopolitical "
-        "network in 3 paragraphs. Focus on: major power actors, key conflict zones, "
-        "most significant tensions, dominant alliance patterns. Use direct, professional "
-        f"language. No hedging. Cite specific entity names.\n\n"
-        f"Graph statistics:\n"
-        f"- {analytics.get('nodes')} entities: {analytics.get('group_counts', {})}\n"
-        f"- {analytics.get('edges')} relationships\n"
-        f"- Most connected: {analytics.get('top_degree', [])}\n\n"
-        f"Key relationships sample:\n"
-        + "\n".join(edge_sample)
-        + "\n\nWrite the 3-paragraph intelligence summary now:"
-    )
-    try:
-        narrative = _call_ollama(prompt, model)
-        return {
-            "narrative": narrative,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+    // If graph grew, trigger live update
+    if (data.graph_nodes !== S.graph?.nodes?.length) {
+      try {
+        const gd = await loadGraphData();
+        if (gd) {
+          S.graph = gd.vis;
+          S.analytics = gd.analytics;
+          updateHeader(gd.analytics);
+          if (S.network) S.network.setData({ nodes: new vis.DataSet(gd.vis.nodes || []), edges: new vis.DataSet(gd.vis.edges || []) });
         }
-    except Exception as exc:
-        raise HTTPException(500, f"Summary generation failed: {exc}")
-
-
-# ── Simulation ────────────────────────────────────────────────────────────────
-
-
-@app.post("/api/simulate")
-async def simulate(req: SimulateRequest, request: Request):
-    _check_rate(request, max_req=5, window=60)
-    if not req.scenario.strip():
-        raise HTTPException(400, "Scenario cannot be empty.")
-    if len(graph.nodes) == 0:
-        raise HTTPException(400, "Graph is empty. Ingest data first.")
-    try:
-        import functools
-
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            functools.partial(run_simulation, req.scenario, graph, model=req.model),
-        )
-    except ConnectionError as exc:
-        raise HTTPException(503, str(exc))
-    except TimeoutError as exc:
-        raise HTTPException(504, str(exc))
-    except Exception as exc:
-        raise HTTPException(500, str(exc))
-    return {
-        "scenario": result.scenario,
-        "risk_score": result.risk_score,
-        "risk_label": result.risk_label,
-        "cascade_narrative": result.cascade_narrative,
-        "second_order": result.second_order,
-        "added_edges": result.added_edges,
-        "removed_edges": result.removed_edges,
-        "affected_nodes": result.affected_nodes,
-        "model_used": result.model_used,
+      } catch {}
     }
+  } catch {}
+}
 
+function renderCycleLog(cycles) {
+  const container = document.getElementById('osint-cycle-log');
+  if (!cycles.length) {
+    container.innerHTML = '<div class="empty-state"><div class="empty-icon">⊙</div>Waiting for first cycle…</div>';
+    return;
+  }
+  container.innerHTML = cycles.map(c => {
+    const ing = c.ingest || {};
+    const ts  = new Date(c.timestamp).toLocaleTimeString();
+    const hasError = ing.error;
+    const queries  = (c.queries || []).slice(0, 5);
+    return `<div class="cycle-card">
+      <div class="cycle-card-header">
+        <span class="cycle-num">CYCLE ${c.cycle}</span>
+        <span class="cycle-ts">${ts} · ${c.elapsed_secs}s</span>
+      </div>
+      <div class="cycle-stats">
+        <span class="cycle-stat" style="color:var(--green)">+${ing.entities||0} ENT</span>
+        <span class="cycle-stat" style="color:var(--purple)">+${ing.relations||0} REL</span>
+        <span class="cycle-stat" style="color:var(--amber)">${ing.articles||0} ART</span>
+        <span class="cycle-stat" style="color:var(--text-lo)">${c.nodes}N / ${c.edges}E</span>
+        ${hasError ? `<span class="cycle-stat" style="color:var(--red)">⚠ ${esc(String(ing.error))}</span>` : ''}
+      </div>
+      ${queries.length ? `<div class="cycle-queries">
+        ${queries.map(q => `<div class="cq-row">
+          <span class="cq-query">▸ ${esc(q.query || '')}</span>
+          <span class="cq-count">${q.error ? '⚠ err' : (q.count !== undefined ? q.count + ' rows' : '')}</span>
+        </div>`).join('')}
+      </div>` : ''}
+    </div>`;
+  }).join('');
+}
 
-@app.get("/api/simulations")
-def get_simulations():
-    history_file = "sim_history.json"
-    if not os.path.exists(history_file):
-        return {"history": []}
-    try:
-        with open(history_file, encoding="utf-8") as f:
-            return {"history": json.load(f)}
-    except Exception as exc:
-        raise HTTPException(500, f"Failed to read simulation history: {exc}")
+function switchOsintTab(tab) {
+  document.getElementById('osint-view-cycles').style.display  = tab === 'cycles'   ? '' : 'none';
+  document.getElementById('osint-view-articles').style.display = tab === 'articles' ? '' : 'none';
+  document.getElementById('osint-tab-cycles').classList.toggle('active',   tab === 'cycles');
+  document.getElementById('osint-tab-articles').classList.toggle('active', tab === 'articles');
+}
 
+/* ── One-shot manual ingest button ── */
+document.getElementById('btn-osint-ingest').addEventListener('click', async () => {
+  const limit = parseInt(document.getElementById('osint-art-limit').value) || 5;
+  setLoading('btn-osint-ingest', true);
+  document.getElementById('osint-ingest-status').style.display = 'flex';
+  try {
+    await API.post('/api/osint/ingest', { model: S.model, articles_per_feed: limit });
+    toast('OSINT ingestion started in background', 'info');
+    let polls = 0;
+    const iv = setInterval(async () => {
+      await refreshOsintStatus(); polls++;
+      if (polls > 20) { clearInterval(iv); document.getElementById('osint-ingest-status').style.display = 'none'; }
+    }, 3000);
+  } catch(e) { toast(e.message, 'error'); document.getElementById('osint-ingest-status').style.display = 'none'; }
+  finally { setLoading('btn-osint-ingest', false); }
+});
 
-# ── Forecast ──────────────────────────────────────────────────────────────────
+document.getElementById('btn-osint-refresh').addEventListener('click', async () => {
+  await refreshOsintStatus();
+  await refreshContinuousStatus();
+});
 
+async function refreshOsintStatus() {
+  try {
+    const data = await API.get('/api/osint/status');
+    if (!data.running) document.getElementById('osint-ingest-status').style.display = 'none';
+    document.getElementById('osint-stats').innerHTML = [
+      {val: data.feeds, lbl:'FEEDS'},
+      {val: data.processed_urls, lbl:'PROCESSED'},
+      {val: data.last_run ? new Date(data.last_run).toLocaleTimeString() : '—', lbl:'LAST RUN'},
+      {val: data.running ? '●' : '○', lbl:'STATUS', color: data.running ? 'var(--amber)' : 'var(--text-lo)'},
+    ].map(s => `<div class="stat-card" style="padding:10px"><div class="stat-val" style="font-size:18px;${s.color?`color:${s.color}`:''}">${s.val}</div><div class="stat-name">${s.lbl}</div></div>`).join('');
+    const log = data.recent_log || [];
+    document.getElementById('osint-article-log').innerHTML = log.length
+      ? log.map(a => `<div class="article-log-item"><div class="art-title">${a.title||a.url}</div><div class="art-meta"><span class="art-status-${a.status}">${a.status.toUpperCase()}</span><span style="color:var(--text-lo);font-size:10px;font-family:var(--font-mono)">${a.feed||''}</span>${a.status==='ok'?`<span style="color:var(--green);font-size:10px;font-family:var(--font-mono)">+${a.entities}E +${a.relations}R</span>`:''}</div></div>`).join('')
+      : '<div class="empty-state"><div class="empty-icon">⊙</div>No articles ingested yet</div>';
+    renderFeedList();
+  } catch {}
+}
 
-@app.post("/api/forecast")
-def forecast(req: ForecastRequest, request: Request):
-    _check_rate(request, max_req=5, window=60)
-    if len(graph.nodes) < 3:
-        raise HTTPException(400, "Need at least 3 nodes to generate a forecast.")
-    try:
-        result = run_forecast(graph, model=req.model, focus_query=req.focus)
-    except ConnectionError as exc:
-        raise HTTPException(503, str(exc))
-    except TimeoutError as exc:
-        raise HTTPException(504, str(exc))
-    except Exception as exc:
-        raise HTTPException(500, str(exc))
-    return {
-        "global_risk": result.global_risk,
-        "global_label": result.global_label,
-        "structural_summary": result.structural_summary,
-        "hotspot_nodes": result.hotspot_nodes,
-        "model_used": result.model_used,
-        "forecasts": [
-            {
-                "rank": f.rank,
-                "title": f.title,
-                "actors": f.actors,
-                "probability": f.probability,
-                "severity": f.severity,
-                "timeframe": f.timeframe,
-                "structural_signal": f.structural_signal,
-                "narrative": f.narrative,
-                "mitigation": f.mitigation,
-            }
-            for f in result.forecasts
-        ],
+async function renderFeedList() {
+  try {
+    const data = await API.get('/api/osint/feeds');
+    document.getElementById('feed-list').innerHTML = (data.feeds || []).map(f =>
+      `<div class="feed-item" data-feed-url="${esc(f.url)}"><div><div class="feed-name">${esc(f.name)}</div><div class="feed-url">${esc(f.url)}</div></div><div class="feed-remove" onclick="removeFeed(this.closest('.feed-item').dataset.feedUrl)">&#x2715;</div></div>`
+    ).join('') || '<div class="empty-state" style="padding:10px"><div class="empty-icon" style="font-size:20px">⊙</div>No feeds configured</div>';
+  } catch {}
+}
+
+async function removeFeed(url) {
+  try { await fetch(`/api/osint/feeds?url=${encodeURIComponent(url)}`, { method: 'DELETE' }); toast('Feed removed','info'); renderFeedList(); }
+  catch(e) { toast(e.message,'error'); }
+}
+
+document.getElementById('btn-add-feed').addEventListener('click', async () => {
+  const url  = document.getElementById('feed-url-input').value.trim();
+  const name = document.getElementById('feed-name-input').value.trim();
+  if (!url) { toast('Enter a feed URL','warn'); return; }
+  try {
+    await API.post('/api/osint/feeds', { url, name });
+    document.getElementById('feed-url-input').value = '';
+    document.getElementById('feed-name-input').value = '';
+    toast('Feed added','success'); renderFeedList();
+  } catch(e) { toast(e.message,'error'); }
+});
+
+document.getElementById('btn-gdelt-query').addEventListener('click', async () => {
+  const entity = document.getElementById('gdelt-entity-input').value.trim(); if (!entity) return;
+  try {
+    const data = await API.get(`/api/osint/gdelt?entity=${encodeURIComponent(entity)}&days=7`);
+    const container = document.getElementById('gdelt-results'); container.style.display = 'block';
+    document.getElementById('gdelt-result-list').innerHTML = data.articles?.length
+      ? data.articles.slice(0,10).map(a => `<div class="gdelt-result"><div class="gdelt-title"><a href="${a.url}" target="_blank" style="color:var(--accent);text-decoration:none">${a.title||a.url}</a></div><div class="gdelt-date">${a.seendate||''} · ${a.sourcecountry||''}</div></div>`).join('')
+      : '<div class="empty-state">No GDELT results found</div>';
+    toast(`GDELT: ${data.count} articles`, 'info');
+  } catch(e) { toast(e.message,'error'); }
+});
+
+/* On tab switch, sync continuous status */
+const _origTabSwitch = typeof switchTab === 'function' ? switchTab : null;
+
+/* ── BOOT ────────────────────────────────────────────────────────────────────── */
+async function boot() {
+  await checkOllama();
+  try {
+    const data = await loadGraphData();
+    if (data) { S.graph = data.vis; S.analytics = data.analytics; updateHeader(data.analytics); }
+  } catch {}
+  loadSimHistory();
+  // Restore continuous loop UI state if server loop is already running
+  try {
+    const cs = await API.get('/api/osint/continuous/status');
+    if (cs.active) {
+      CL.active = true;
+      CL.cycle  = cs.cycle;
+      CL.intervalSecs = cs.interval_secs;
+      CL.cycleStartedAt = Date.now(); // approximate — server restart resets bar
+      setContinuousUI(true);
+      pollContinuousStatus();
+      startProgressBar();
     }
-
-
-# ── Query (GraphRAG) ──────────────────────────────────────────────────────────
-
-
-@app.post("/api/query")
-def query(req: QueryRequest, request: Request):
-    _check_rate(request, max_req=20, window=60)
-    if len(graph.nodes) == 0:
-        return {"answer": "Graph is empty. Ingest data first.", "context": ""}
-    context = retrieve_graph_context(req.question, graph)
-    prompt = (
-        f"You are a {req.persona}. "
-        "Answer using ONLY the Knowledge Graph Context. "
-        'If insufficient, say "Insufficient data in current intelligence graph."\n\n'
-        f"Knowledge Graph Context:\n{context}\n\n"
-        f"Question: {req.question}\n\nConcise strategic answer:"
-    )
-    try:
-        resp = http.post(
-            f"{OLLAMA_BASE_URL}/api/generate",
-            json={"model": req.model, "prompt": prompt, "stream": False},
-            timeout=60,
-        )
-        resp.raise_for_status()
-        answer = resp.json().get("response", "No response.")
-    except Exception as exc:
-        raise HTTPException(503, f"Ollama error: {exc}")
-    return {"answer": answer, "context": context}
-
-
-# ── Report ────────────────────────────────────────────────────────────────────
-
-
-@app.post("/api/report")
-def export_report(req: ReportRequest, request: Request):
-    _check_rate(request, max_req=5, window=60)
-    import reporter
-
-    try:
-        g = load_graph()
-        summary = ""
-        if req.entities:
-            context = retrieve_graph_context(" ".join(req.entities), g)
-            prompt = (
-                f"You are a senior geopolitical intelligence analyst.\n"
-                f"Write a concise executive strategic summary (max 3 paragraphs) "
-                f"focusing on {', '.join(req.entities)}.\n\n"
-                f"Context:\n{context}\n\nStrategic Summary:"
-            )
-            try:
-                resp = http.post(
-                    f"{OLLAMA_BASE_URL}/api/generate",
-                    json={"model": req.model, "prompt": prompt, "stream": False},
-                    timeout=60,
-                )
-                resp.raise_for_status()
-                summary = resp.json().get("response", "").strip()
-            except Exception as exc:
-                logger.warning("Failed to generate LLM summary: %s", exc)
-
-        if req.format.lower() in ("md", "markdown"):
-            md_content = reporter.generate_markdown_report(g, req.entities, summary)
-            return Response(
-                content=md_content,
-                media_type="text/markdown",
-                headers={"Content-Disposition": "attachment; filename=goies_brief.md"},
-            )
-        else:
-            pdf_bytes = reporter.generate_report(g, req.entities, summary)
-            return Response(
-                content=pdf_bytes,
-                media_type="application/pdf",
-                headers={"Content-Disposition": "attachment; filename=goies_brief.pdf"},
-            )
-    except Exception as exc:
-        raise HTTPException(500, f"Report failed: {exc}")
-
-
-# ── Snapshots ─────────────────────────────────────────────────────────────────
-
-
-@app.get("/api/snapshots")
-def list_snapshots():
-    if not os.path.exists("goies_snapshots"):
-        return {"snapshots": []}
-    files = sorted(
-        [f for f in os.listdir("goies_snapshots") if f.endswith(".json")], reverse=True
-    )
-    return {"snapshots": files}
-
-
-@app.get("/api/snapshots/timeline")
-def timeline():
-    if not os.path.exists("goies_snapshots"):
-        return {"timeline": []}
-    files = sorted([f for f in os.listdir("goies_snapshots") if f.endswith(".json")])
-    return {
-        "timeline": [
-            {"id": f, "date": m.group(1)}
-            for f in files
-            for m in [re.search(r"v_(.*?)\.json$", f)]
-            if m
-        ]
-    }
-
-
-@app.get("/api/snapshots/{snapshot_id}")
-def get_snapshot(snapshot_id: str):
-    snapshots_dir = pathlib.Path("goies_snapshots").resolve()
-    filepath = (snapshots_dir / snapshot_id).resolve()
-    if not str(filepath).startswith(str(snapshots_dir) + os.sep):
-        raise HTTPException(400, "Invalid snapshot ID.")
-    if not filepath.exists() or filepath.suffix != ".json":
-        raise HTTPException(404, "Snapshot not found.")
-    try:
-        with open(filepath, encoding="utf-8") as f:
-            data = json.load(f)
-        g = nx.node_link_graph(data, directed=True, multigraph=False)
-    except (json.JSONDecodeError, ValueError, KeyError) as exc:
-        logger.warning("Corrupt snapshot %s: %s", snapshot_id, exc)
-        raise HTTPException(500, "Snapshot file is corrupt.")
-    return {
-        "vis": graph_to_vis(g),
-        "analytics": get_graph_analytics(g, watch_list_thresholds),
-    }
-
-
-# ── Watch list (FIX-10) ───────────────────────────────────────────────────────
-
-
-@app.post("/api/watch_list")
-def update_watch_list(req: WatchListRequest):
-    global watch_list_thresholds
-    watch_list_thresholds = req.thresholds
-    try:
-        WATCH_THRESHOLDS_FILE.write_text(
-            json.dumps(watch_list_thresholds, indent=2), encoding="utf-8"
-        )
-    except OSError as exc:
-        logger.warning("Could not persist watch thresholds: %s", exc)
-    return {
-        "status": "success",
-        "thresholds": watch_list_thresholds,
-        "persistent": True,
-    }
-
-
-# ── GQL ───────────────────────────────────────────────────────────────────────
-
-
-@app.post("/api/gql")
-def gql_query(req: GQLRequest, request: Request):
-    _check_rate(request, max_req=60, window=60)
-    if not req.query.strip():
-        raise HTTPException(400, "Query cannot be empty.")
-    result = run_gql(req.query, graph)
-    return result
-
-
-@app.get("/api/gql/help")
-def gql_help():
-    return {"help": GQLParser.help_text()}
-
-
-# ── Embeddings ────────────────────────────────────────────────────────────────
-
-
-@app.post("/api/embed/train")
-async def embed_train(request: Request):
-    _check_rate(request, max_req=3, window=60)
-    if graph.number_of_nodes() < 5:
-        raise HTTPException(400, "Need at least 5 nodes to train embeddings.")
-    result = await embedding_engine.train_async(graph)
-    if result.get("status") == "error":
-        raise HTTPException(500, result["reason"])
-    return result
-
-
-@app.get("/api/embed/status")
-def embed_status():
-    return embedding_engine.status()
-
-
-@app.get("/api/embed/similar/{node_id:path}")
-def embed_similar(node_id: str, k: int = 8):
-    if not embedding_engine.is_trained:
-        raise HTTPException(
-            400, "Embeddings not trained yet. Call POST /api/embed/train first."
-        )
-    canonical = resolve_node_name(graph, node_id)
-    sims = embedding_engine.similar_nodes(str(canonical), top_k=k)
-    if not sims and canonical not in embedding_engine.embeddings:
-        raise HTTPException(404, f"Node '{node_id}' not found in embedding space.")
-    return {
-        "node": canonical,
-        "similar": [{"id": nid, "score": round(score, 4)} for nid, score in sims],
-    }
-
-
-@app.get("/api/embed/search")
-def embed_search(q: str, k: int = 8):
-    if not embedding_engine.is_trained:
-        raise HTTPException(400, "Embeddings not trained yet.")
-    results = embedding_engine.similar_to_query(q, graph, top_k=k)
-    return {
-        "query": q,
-        "results": [{"id": nid, "score": round(s, 4)} for nid, s in results],
-    }
-
-
-@app.get("/api/embed/clusters")
-def embed_clusters(n: int = 5):
-    if not embedding_engine.is_trained:
-        raise HTTPException(400, "Embeddings not trained yet.")
-    n = max(2, min(n, 20))
-    clusters = embedding_engine.cluster_nodes(n_clusters=n)
-    return {"clusters": clusters, "k": n}
-
-
-# ── OSINT ─────────────────────────────────────────────────────────────────────
-
-
-@app.get("/api/osint/status")
-def osint_status():
-    return osint_engine.get_status()
-
-
-@app.get("/api/osint/feeds")
-def list_feeds():
-    return {"feeds": osint_engine.get_feeds()}
-
-
-@app.post("/api/osint/feeds", status_code=201)
-def add_feed(req: FeedRequest):
-    osint_engine.add_feed(req.url, req.name)
-    return {"added": True, "url": req.url}
-
-
-@app.delete("/api/osint/feeds")
-def remove_feed(url: str):
-    osint_engine.remove_feed(url)
-    return {"removed": True, "url": url}
-
-
-@app.post("/api/osint/ingest")
-async def osint_ingest(req: OsintIngestRequest, background_tasks: BackgroundTasks):
-    async def _run():
-        feeds = osint_engine.get_feeds()
-        for feed_url in feeds:
-            articles = await asyncio.to_thread(
-                osint_engine.fetch_feed_articles, feed_url, req.articles_per_feed
-            )
-            for text in articles:
-                if not text:
-                    continue
-                cancel = CancelToken()
-                try:
-                    await extract_text(
-                        text,
-                        model=req.model,
-                        cancel=cancel,
-                        on_chunk=lambda r: _apply_chunk(r),
-                    )
-                except Exception as exc:
-                    logger.warning("OSINT ingest extraction error: %s", exc)
-        save_graph(graph)
-
-    background_tasks.add_task(_run)
-    return {"status": "ingestion_started"}
-
-
-@app.post("/api/osint/continuous/start")
-async def continuous_start(req: ContinuousStartRequest):
-    global _continuous_task
-    async with _continuous_lock:
-        if _continuous_state["active"]:
-            raise HTTPException(409, "Continuous loop already running.")
-        _continuous_state.update(
-            {
-                "active": True,
-                "cycle": 0,
-                "started_at": datetime.now(timezone.utc).isoformat(),
-                "stopped_at": None,
-                "interval_secs": max(60, req.interval_secs),
-                "articles_per_feed": max(1, min(req.articles_per_feed, 20)),
-                "model": req.model,
-                "query_log": [],
-                "cycle_log": [],
-                "total_entities": 0,
-                "total_relations": 0,
-                "total_articles": 0,
-            }
-        )
-        _continuous_task = asyncio.create_task(_continuous_loop())
-    logger.info("Continuous OSINT loop activated — interval=%ds", req.interval_secs)
-    return {
-        "status": "started",
-        "interval_secs": _continuous_state["interval_secs"],
-        "feeds": len(osint_engine.get_feeds()),
-    }
-
-
-@app.post("/api/osint/continuous/stop")
-async def continuous_stop():
-    global _continuous_task
-    task_to_await = None
-    async with _continuous_lock:
-        if not _continuous_state["active"]:
-            raise HTTPException(409, "Continuous loop is not running.")
-        _continuous_state["active"] = False
-        if _continuous_task and not _continuous_task.done():
-            _continuous_task.cancel()
-            task_to_await = _continuous_task
-    if task_to_await:
-        try:
-            await asyncio.wait_for(asyncio.shield(task_to_await), timeout=10.0)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
-            pass
-    logger.info("Continuous OSINT loop stopped.")
-    return {"status": "stopping", "cycles_completed": _continuous_state["cycle"]}
-
-
-@app.get("/api/osint/continuous/status")
-def continuous_status():
-    s = _continuous_state
-    return {
-        "active": s["active"],
-        "cycle": s["cycle"],
-        "started_at": s["started_at"],
-        "stopped_at": s["stopped_at"],
-        "interval_secs": s["interval_secs"],
-        "articles_per_feed": s["articles_per_feed"],
-        "model": s["model"],
-        "total_entities": s["total_entities"],
-        "total_relations": s["total_relations"],
-        "total_articles": s["total_articles"],
-        "graph_nodes": graph.number_of_nodes(),
-        "graph_edges": graph.number_of_edges(),
-        "cycle_log": s["cycle_log"][:10],
-        "query_log": s["query_log"][:20],
-    }
-
-
-@app.post("/api/osint/enrich/{node_id:path}")
-async def osint_enrich(node_id: str, request: Request, model: str = DEFAULT_MODEL):
-    _check_rate(request, max_req=10, window=60)
-    canonical = resolve_node_name(graph, node_id)
-    if canonical not in graph:
-        raise HTTPException(404, f"Node '{node_id}' not found.")
-    enrichment = await osint_engine.enrich_entity_wikipedia(canonical, model)
-    if enrichment and "error" not in enrichment:
-        attrs = graph.nodes[canonical].get("attributes", {})
-        if isinstance(attrs, str):
-            try:
-                attrs = ast.literal_eval(attrs)
-            except (ValueError, SyntaxError):
-                attrs = {}
-        attrs.update(enrichment)
-        graph.nodes[canonical]["attributes"] = attrs
-        save_graph(graph)
-    return {"node": canonical, "enrichment": enrichment}
-
-
-@app.get("/api/osint/gdelt")
-async def osint_gdelt(entity: str, days: int = 7):
-    days = max(1, min(days, 90))
-    articles = await osint_engine.query_gdelt(entity, days)
-    return {"entity": entity, "articles": articles, "count": len(articles)}
-
-
-# ── Root ──────────────────────────────────────────────────────────────────────
-
-
-@app.get("/")
-def root():
-    from fastapi.responses import FileResponse, RedirectResponse
-
-    index = pathlib.Path("frontend") / "index.html"
-    if index.exists():
-        return FileResponse(str(index))
-    return RedirectResponse(url="/api/docs")
-
-
-@app.get("/app.html")
-def app_dashboard():
-    from fastapi.responses import FileResponse, RedirectResponse
-
-    page = pathlib.Path("frontend") / "app.html"
-    if page.exists():
-        return FileResponse(str(page))
-    return RedirectResponse(url="/")
-
-
-if __name__ == "__main__":
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+  } catch {}
+  setInterval(checkOllama, 30_000);
+}
+
+boot();
+</script>
+</body>
+</html>

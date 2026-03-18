@@ -6,6 +6,7 @@ All functions return plain UTF-8 text ready for extraction.
 
 from __future__ import annotations
 
+import io
 import re
 from typing import Optional
 
@@ -113,7 +114,7 @@ def parse_pdf(content: bytes) -> str:
     """
     Extract text from a PDF byte payload.
     Tries pypdf first (maintained fork), falls back to PyPDF2.
-    Raises RuntimeError if neither is installed.
+    Raises RuntimeError if neither is installed or the file is not a valid PDF.
     """
     # Attempt 1: pypdf (modern maintained fork)
     try:
@@ -131,11 +132,12 @@ def parse_pdf(content: bytes) -> str:
             return text[:MAX_TEXT_CHARS]
     except ImportError:
         pass
+    except Exception as e:
+        raise RuntimeError(f"Invalid or corrupt PDF file: {e}") from e
 
     # Attempt 2: PyPDF2 (legacy)
     try:
         import PyPDF2
-        import io
 
         reader = PyPDF2.PdfReader(io.BytesIO(content))
         pages = []
@@ -149,6 +151,8 @@ def parse_pdf(content: bytes) -> str:
             return text[:MAX_TEXT_CHARS]
     except ImportError:
         pass
+    except Exception as e:
+        raise RuntimeError(f"Invalid or corrupt PDF file: {e}") from e
 
     raise RuntimeError("PDF parsing requires pypdf or PyPDF2. Run: pip install pypdf")
 
@@ -163,7 +167,6 @@ def parse_docx(content: bytes) -> str:
     Raises RuntimeError if not installed.
     """
     try:
-        import io
         import docx
 
         doc = docx.Document(io.BytesIO(content))
@@ -182,6 +185,3 @@ def parse_docx(content: bytes) -> str:
         )
     except Exception as e:
         raise RuntimeError(f"Failed to parse DOCX: {e}")
-
-
-import io

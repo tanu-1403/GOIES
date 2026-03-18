@@ -1135,7 +1135,7 @@ select { cursor: pointer; }
     <div id="risk-badge" class="risk-LOW">LOW RISK</div>
   </div>
   <div class="header-spacer"></div>
-  <select id="model-select"><option value="llama3.2">llama3.2</option></select>
+  <select id="model-select"><option value="" disabled selected>Loading models…</option></select>
 </header>
 
 <!-- ════════════ NAV ════════════ -->
@@ -1203,7 +1203,7 @@ select { cursor: pointer; }
       <div class="row-2" style="margin-bottom:12px">
         <div class="input-group" style="margin-bottom:0">
           <label class="input-label">MODEL</label>
-          <select id="extract-model"><option value="llama3.2">llama3.2</option></select>
+          <select id="extract-model"><option value="" disabled selected>Loading models…</option></select>
         </div>
         <div class="input-group" style="margin-bottom:0">
           <label class="input-label">ANALYST PERSONA</label>
@@ -1268,6 +1268,15 @@ select { cursor: pointer; }
     </div>
     <div id="node-inspector">
       <div class="inspector-empty">◈<br/>Click a node to inspect</div>
+    </div>
+    <div id="watch-bar" style="padding:12px;border-top:1px solid var(--border)">
+      <div class="section-title" style="margin-bottom:8px">ALERT THRESHOLDS</div>
+      <div style="display:flex;gap:6px;margin-bottom:6px">
+        <input type="text" id="watch-node-input" placeholder="Node name…" style="flex:1;font-size:11px;padding:5px 8px"/>
+        <input type="number" id="watch-threshold-input" placeholder="0–100" min="0" max="100" style="width:60px;font-size:11px;padding:5px 8px"/>
+        <button class="btn btn-ghost btn-sm" id="btn-add-watch">SET</button>
+      </div>
+      <div id="watch-list-display" style="font-size:11px;color:var(--text-lo);max-height:90px;overflow-y:auto"></div>
     </div>
     <div id="path-bar">
       <div class="section-title" style="margin-bottom:8px">PATH FINDER</div>
@@ -1371,6 +1380,15 @@ select { cursor: pointer; }
       </div>
     </div>
     <div id="chat-input-row">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <label style="font-size:10px;letter-spacing:.08em;color:var(--text-lo);white-space:nowrap">PERSONA</label>
+        <select id="query-persona" style="flex:1;font-size:11px;padding:4px 6px">
+          <option value="senior geopolitical intelligence analyst">Geopolitical Analyst</option>
+          <option value="military intelligence officer">Military Intel Officer</option>
+          <option value="economic sanctions expert">Economic Analyst</option>
+          <option value="counterterrorism analyst">CT Analyst</option>
+        </select>
+      </div>
       <textarea id="chat-input" rows="2" placeholder="Ask about the intelligence graph..."></textarea>
       <button class="btn btn-primary" id="btn-query" style="align-self:flex-end">
         <span class="btn-text">⊹ SEND</span><span class="btn-loader">↻</span>
@@ -1788,12 +1806,20 @@ async function checkOllama() {
       if (!sel) return;
       const current = sel.value;
       sel.innerHTML = models.map(m => `<option value="${m}"${m===current?' selected':''}>${m}</option>`).join('');
+      if (!sel.value && models.length) sel.value = models[0];
+      S.model = document.getElementById('model-select').value || models[0];
     });
   } else {
     dot.className = 'pulse-dot offline';
     txt.textContent = 'OFFLINE';
     txt.style.color = 'var(--red)';
     indicator.className = 'is-offline';
+    ['model-select','extract-model'].forEach(id => {
+      const sel = document.getElementById(id);
+      if (!sel || sel.querySelector('option:not([disabled])')) return;
+      sel.innerHTML = '<option value="llama3.2">llama3.2 (offline)</option>';
+      S.model = 'llama3.2';
+    });
   }
 }
 
@@ -1830,6 +1856,43 @@ document.querySelectorAll('.nav-tab').forEach(btn => {
 });
 
 document.getElementById('model-select').addEventListener('change', e => { S.model = e.target.value; });
+
+/* ── WATCH LIST ──────────────────────────────────────────────────────────────────────────────── */
+const _watchThresholds = {};
+function renderWatchList() {
+  const el = document.getElementById('watch-list-display');
+  if (!el) return;
+  const entries = Object.entries(_watchThresholds);
+  if (!entries.length) { el.innerHTML = '<span style="color:var(--text-lo)">No thresholds set</span>'; return; }
+  el.innerHTML = entries.map(([n,v]) =>
+    `<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:0.5px solid var(--border)">` +
+    `<span style="color:var(--text-mid);font-family:var(--font-mono)">${n}</span>` +
+    `<span style="display:flex;gap:6px;align-items:center">` +
+    `<span style="color:var(--accent)">&ge;${v}</span>` +
+    `<span style="cursor:pointer;color:var(--red);font-size:13px" onclick="removeWatch('${n}')">×</span>` +
+    `</span></div>`
+  ).join('');
+}
+function removeWatch(node) {
+  delete _watchThresholds[node];
+  API.post('/api/watch_list', { thresholds: _watchThresholds }).catch(() => {});
+  renderWatchList();
+  toast(`Alert removed: ${node}`, 'info');
+}
+document.getElementById('btn-add-watch').addEventListener('click', async () => {
+  const node = document.getElementById('watch-node-input').value.trim();
+  const val  = parseFloat(document.getElementById('watch-threshold-input').value);
+  if (!node || isNaN(val) || val < 0 || val > 100) { toast('Enter a node name and a threshold between 0–100', 'warn'); return; }
+  _watchThresholds[node] = val;
+  try {
+    await API.post('/api/watch_list', { thresholds: _watchThresholds });
+    document.getElementById('watch-node-input').value = '';
+    document.getElementById('watch-threshold-input').value = '';
+    renderWatchList();
+    toast(`Alert set: ${node} ≥ ${val}`, 'success');
+  } catch(e) { toast(e.message, 'error'); }
+});
+renderWatchList();
 
 /* ── FILE UPLOAD ─────────────────────────────────────────────────────────────── */
 /* ── FILE UPLOAD STATE ───────────────────────────────────────────────────────── */
@@ -1869,7 +1932,7 @@ document.getElementById('btn-fetch-url').addEventListener('click', async () => {
   if (!url) { toast('Enter a URL', 'warn'); return; }
   setLoading('btn-fetch-url', true);
   try {
-    const data = await API.post('/api/ingest/url', { url });
+    const data = await API.post('/api/ingest/url/fetch', { url });
     document.getElementById('url-text-wrap').style.display = 'block';
     document.getElementById('url-text-preview').value = data.text || '';
     toast('URL fetched', 'success');
@@ -2050,6 +2113,14 @@ function inspectNode(nodeId) {
     <div style="margin-top:12px;display:flex;gap:6px">
       <button class="btn btn-ghost btn-sm" style="flex:1" data-ego-node="${safeId}" onclick="filterEgo(this.dataset.egoNode)">EGO VIEW</button>
     </div>
+    <div style="margin-top:10px">
+      <div class="section-title" style="margin-bottom:6px">MERGE NODE</div>
+      <div style="display:flex;gap:6px">
+        <input type="text" id="merge-target-input" placeholder="Merge '${safeId}' into…" style="flex:1;font-size:11px;padding:5px 8px"/>
+        <button class="btn btn-ghost btn-sm" onclick="doMergeNode('${safeId}')">MERGE</button>
+      </div>
+      <div id="merge-result-${safeId}" style="font-size:11px;margin-top:4px;color:var(--text-lo)"></div>
+    </div>
   `;
 }
 
@@ -2060,6 +2131,21 @@ async function filterEgo(nodeId) {
     initOrUpdateGraph();
     toast(`Ego view: ${nodeId}`, 'info');
   } catch(e) { toast(e.message, 'error'); }
+}
+
+async function doMergeNode(sourceId) {
+  const input = document.getElementById('merge-target-input');
+  if (!input) return;
+  const target = input.value.trim();
+  if (!target) { toast('Enter a node name to merge into', 'warn'); return; }
+  if (target === sourceId) { toast('Cannot merge a node into itself', 'warn'); return; }
+  try {
+    await API.post('/api/node/merge', { source: sourceId, target });
+    toast(`Merged '${sourceId}' into '${target}'`, 'success');
+    const data = await loadGraphData();
+    if (data) { S.graph = data.vis; S.analytics = data.analytics; updateHeader(data.analytics); initOrUpdateGraph(); }
+    document.getElementById('node-inspector').innerHTML = '<div class="inspector-empty">◈<br/>Click a node to inspect</div>';
+  } catch(e) { toast(`Merge failed: ${e.message}`, 'error'); }
 }
 
 function renderGroupChips() {
@@ -2248,12 +2334,13 @@ document.getElementById('chat-input').addEventListener('keydown', e => { if (e.k
 async function sendQuery() {
   const question = document.getElementById('chat-input').value.trim();
   if (!question) return;
+  const persona = document.getElementById('query-persona').value;
   document.getElementById('chat-input').value = '';
   addChatMessage('user', question);
   setLoading('btn-query', true);
   const thinking = addChatMessage('assistant', '<span class="thinking-dots">Analyzing graph</span>');
   try {
-    const data = await API.post('/api/query', { question, model: S.model });
+    const data = await API.post('/api/query', { question, model: S.model, persona });
     thinking.querySelector('.chat-bubble').innerHTML = esc(data.answer).replace(/\n/g,'<br/>');
     thinking.querySelector('.chat-time').textContent = new Date().toLocaleTimeString();
     document.getElementById('chat-context-text').textContent = data.context || 'No graph context used.';
