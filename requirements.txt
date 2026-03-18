@@ -1,37 +1,38 @@
-# GOIES — Complete Requirements
-# Install: pip install -r requirements.txt
+# GOIES — Python dependencies
+# Fix #1: httpx replaces requests for async Ollama calls
 
-# ── Core API & Server ──────────────────────────────────────────────────────────
+# Web framework
 fastapi>=0.110.0
-uvicorn[standard]>=0.27.0
-pydantic>=2.0.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9      # file uploads
 
-# ── Graph Engine ──────────────────────────────────────────────────────────────
-networkx>=3.2
-
-# ── Numerical (required by embedding_engine.py) ───────────────────────────────
-numpy>=1.26.0
-
-# ── Graph Embeddings (lazy-imported by embedding_engine.py) ──────────────────
-node2vec>=0.4.6
-gensim>=4.3.0
-
-# ── HTTP / LLM ────────────────────────────────────────────────────────────────
-requests>=2.31.0
+# Async HTTP (Fix #1 — replaces blocking requests)
 httpx>=0.27.0
 
-# ── Document Parsing ──────────────────────────────────────────────────────────
-pypdf>=4.0.0
-python-docx>=1.1.0
-python-multipart>=0.0.9
+# Graph engine
+networkx>=3.2
 
-# ── Text Extraction from URLs ─────────────────────────────────────────────────
-readability-lxml>=0.8.1
-beautifulsoup4>=4.12.0
+# LLM / NLP
+# (Ollama runs locally — no Python client needed; httpx talks to its REST API)
+
+# Embeddings
+node2vec>=0.4.6
+scikit-learn>=1.4.0
+numpy>=1.26.0
+
+# OSINT / ingestion
+feedparser>=6.0.11           # RSS/Atom
+pdfplumber>=0.11.0           # PDF extraction
+python-docx>=1.1.0           # DOCX extraction
+beautifulsoup4>=4.12.0       # URL scraping
 lxml>=5.1.0
 
-# ── RSS Ingestion (lazy-imported by osint_engine.py) ──────────────────────────
-feedparser>=6.0.11
+# Report generation
+reportlab>=4.1.0             # PDF reports
 
-# ── Report Generation ─────────────────────────────────────────────────────────
-reportlab>=4.1.0
+# Utilities
+python-dotenv>=1.0.1
+aiofiles>=23.2.1
+
+# Optional — keep requests for legacy ingestor URL fetch (sync path)
+requests>=2.31.0

@@ -1,4 +1,5 @@
 """
+<<<<<<< HEAD
 utils.py — GOIES Shared Utilities
 Handles: graph persistence, entity resolution, analytics, text chunking, exports.
 
@@ -18,11 +19,31 @@ import json
 import logging
 import pathlib
 import re
+=======
+utils.py  —  GOIES Graph Helpers & Persistence
+===============================================
+Fixes applied:
+  #4  Graph clear() now wipes backend NetworkX state (not just frontend signal)
+  #9  Graph persistence rewritten: atomic write (tmp → rename), fsync,
+      load-with-validation, auto-recovery from corrupt file
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import shutil
+import tempfile
+import time
+from datetime import datetime, timezone
+>>>>>>> ce28496 (v3 initiate)
 from difflib import SequenceMatcher
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import networkx as nx
 
+<<<<<<< HEAD
 logger = logging.getLogger("goies.utils")
 
 GRAPH_SAVE_PATH = pathlib.Path("goies_graph.json")
@@ -60,13 +81,27 @@ def chunk_text(
     if current:
         chunks.append(current)
     return chunks or [text]
+=======
+log = logging.getLogger(__name__)
+
+GRAPH_PATH = os.getenv("GOIES_GRAPH_PATH", "goies_graph.json")
+SNAPSHOT_DIR = os.getenv("GOIES_SNAPSHOT_DIR", "goies_snapshots")
+FUZZY_THRESH = float(os.getenv("FUZZY_THRESH", "0.82"))
+
+# ── In-memory graph (single global instance) ─────────────────────────────────
+
+_G: nx.DiGraph = nx.DiGraph()
 
 
-# ── Entity Resolution ─────────────────────────────────────────────────────────
-def _similarity(a: str, b: str) -> float:
-    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+def get_graph() -> nx.DiGraph:
+    return _G
+>>>>>>> ce28496 (v3 initiate)
 
 
+# ── Graph clear (Fix #4) ──────────────────────────────────────────────────────
+
+
+<<<<<<< HEAD
 # Resolution cache: maps (graph_id, raw_lower_name) → canonical node name.
 # Keyed on id(graph) so it is automatically invalidated when the graph object
 # is replaced (e.g. after a clear).  Cache is bounded to 10 000 entries.
@@ -106,11 +141,43 @@ def resolve_node_name(graph: nx.DiGraph, raw_name: str) -> str:
         _resolve_cache.clear()
     _resolve_cache[cache_key] = result
     return result
+=======
+def clear_graph() -> None:
+    """
+    Completely wipe the in-memory NetworkX graph AND persist the empty state.
+    Previously only signalled the frontend; the backend graph was never reset.
+    """
+    global _G
+    _G = nx.DiGraph()
+    _safe_save(_G, GRAPH_PATH)
+    log.info("Graph cleared — backend state reset and persisted.")
+>>>>>>> ce28496 (v3 initiate)
 
 
-def merge_nodes(graph: nx.DiGraph, source_node: str, target_node: str) -> bool:
-    if source_node not in graph or source_node == target_node:
+# ── Node / edge helpers ───────────────────────────────────────────────────────
+
+
+def add_node(
+    graph: nx.DiGraph,
+    node_id: str,
+    group: str = "unknown",
+    confidence: float = 1.0,
+    attributes: Optional[dict] = None,
+    source_count: int = 1,
+) -> bool:
+    """Add or update a node. Returns True if it was newly created."""
+    ts = datetime.now(timezone.utc).isoformat()
+    if node_id in graph:
+        # Merge: bump source count, keep highest confidence
+        old = graph.nodes[node_id]
+        graph.nodes[node_id]["source_count"] = old.get("source_count", 1) + 1
+        graph.nodes[node_id]["confidence"] = max(old.get("confidence", 0), confidence)
+        if attributes:
+            existing = old.get("attributes", {})
+            existing.update(attributes)
+            graph.nodes[node_id]["attributes"] = existing
         return False
+<<<<<<< HEAD
 
     if target_node not in graph:
         nx.relabel_nodes(graph, {source_node: target_node}, copy=False)
@@ -171,6 +238,36 @@ def save_graph(graph: nx.DiGraph, path: pathlib.Path = GRAPH_SAVE_PATH) -> None:
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
     snapshot_path = snapshots_dir / f"goies_graph_v_{timestamp}.json"
     snapshot_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+=======
+    graph.add_node(
+        node_id,
+        group=group,
+        confidence=confidence,
+        attributes=attributes or {},
+        ingested_at=ts,
+        source_count=source_count,
+        tension_score=0.0,
+    )
+    return True
+
+
+def add_edge(
+    graph: nx.DiGraph,
+    from_id: str,
+    to_id: str,
+    label: str,
+    confidence: float = 1.0,
+) -> bool:
+    """Add a directed edge. Returns True if newly created."""
+    ts = datetime.now(timezone.utc).isoformat()
+    if graph.has_edge(from_id, to_id):
+        existing = graph[from_id][to_id]
+        if existing.get("label") == label:
+            existing["confidence"] = max(existing.get("confidence", 0), confidence)
+            return False
+    graph.add_edge(from_id, to_id, label=label, confidence=confidence, ingested_at=ts)
+    return True
+>>>>>>> ce28496 (v3 initiate)
 
     # Rotate: delete oldest snapshots beyond MAX_SNAPSHOTS
     existing = sorted(snapshots_dir.glob("goies_graph_v_*.json"))
@@ -181,6 +278,7 @@ def save_graph(graph: nx.DiGraph, path: pathlib.Path = GRAPH_SAVE_PATH) -> None:
             logger.warning("Could not delete old snapshot %s: %s", snap, exc)
 
 
+<<<<<<< HEAD
 def load_graph(path: pathlib.Path = GRAPH_SAVE_PATH) -> nx.DiGraph:
     if not path.exists():
         return nx.DiGraph()
@@ -251,10 +349,60 @@ def detect_conflicts(graph: nx.DiGraph) -> List[Dict[str, Any]]:
         if has_hostile and has_coop:
             conflicts.append(
                 {"nodes": [u, v], "hostile_edge": h_edge, "cooperative_edge": c_edge}
+=======
+# ── Fuzzy resolution ──────────────────────────────────────────────────────────
+
+
+def fuzzy_resolve(name: str, graph: nx.DiGraph) -> str:
+    """Return the canonical node ID that best matches *name*, or *name* itself."""
+    for node_id in graph.nodes:
+        ratio = SequenceMatcher(None, name.lower(), node_id.lower()).ratio()
+        if ratio >= FUZZY_THRESH:
+            return node_id
+    return name
+
+
+def merge_nodes(graph: nx.DiGraph, keep_id: str, drop_id: str) -> bool:
+    """
+    Merge *drop_id* into *keep_id*: re-point all edges, delete drop node.
+    Returns True on success.
+    """
+    if drop_id not in graph or keep_id not in graph:
+        return False
+    for pred in list(graph.predecessors(drop_id)):
+        data = graph[pred][drop_id].copy()
+        graph.remove_edge(pred, drop_id)
+        if pred != keep_id:
+            add_edge(
+                graph,
+                pred,
+                keep_id,
+                data.get("label", "related"),
+                data.get("confidence", 1.0),
+>>>>>>> ce28496 (v3 initiate)
             )
-    return conflicts
+    for succ in list(graph.successors(drop_id)):
+        data = graph[drop_id][succ].copy()
+        graph.remove_edge(drop_id, succ)
+        if succ != keep_id:
+            add_edge(
+                graph,
+                keep_id,
+                succ,
+                data.get("label", "related"),
+                data.get("confidence", 1.0),
+            )
+    # Merge attributes
+    drop_attrs = graph.nodes[drop_id].get("attributes", {})
+    keep_attrs = graph.nodes[keep_id].get("attributes", {})
+    keep_attrs.update({k: v for k, v in drop_attrs.items() if k not in keep_attrs})
+    graph.nodes[keep_id]["attributes"] = keep_attrs
+    graph.remove_node(drop_id)
+    log.info("Merged node '%s' → '%s'", drop_id, keep_id)
+    return True
 
 
+<<<<<<< HEAD
 def graph_health_score(graph: nx.DiGraph) -> Dict[str, Any]:
     groups = [data.get("group", "unknown") for _, data in graph.nodes(data=True)]
     group_diversity = len(set(groups)) / 7.0 if graph.number_of_nodes() > 0 else 0
@@ -284,32 +432,33 @@ def graph_health_score(graph: nx.DiGraph) -> Dict[str, Any]:
         suggestions.append("Extract more relationships to increase graph density.")
 
     return {"score": health, "suggestions": suggestions}
+=======
+# ── Analytics ─────────────────────────────────────────────────────────────────
+>>>>>>> ce28496 (v3 initiate)
 
 
-def get_graph_analytics(
-    graph: nx.DiGraph, custom_thresholds: Dict[str, float] = None
-) -> Dict[str, Any]:
-    n, e = len(graph.nodes), len(graph.edges)
+def get_graph_analytics(graph: nx.DiGraph) -> dict:
+    n = graph.number_of_nodes()
+    e = graph.number_of_edges()
     if n == 0:
         return {
-            "nodes": 0,
-            "edges": 0,
+            "node_count": 0,
+            "edge_count": 0,
             "density": 0.0,
+            "components": 0,
             "top_degree": [],
             "top_betweenness": [],
-            "weakly_connected_components": 0,
             "group_counts": {},
-            "conflicts": [],
-            "tensions": {},
-            "health": {
-                "score": 0,
-                "suggestions": ["Ingest some text to start building the graph!"],
-            },
         }
 
-    degree_cent = nx.degree_centrality(graph)
-    top_degree = sorted(degree_cent.items(), key=lambda x: x[1], reverse=True)[:5]
+    degree_c = nx.degree_centrality(graph)
+    between_c: dict[str, float] = {}
+    try:
+        between_c = nx.betweenness_centrality(graph, normalized=True)
+    except Exception:
+        pass
 
+<<<<<<< HEAD
     top_betweenness: List[Tuple[str, float]] = []
     if n >= 4:
         try:
@@ -317,37 +466,34 @@ def get_graph_analytics(
             top_betweenness = sorted(bet.items(), key=lambda x: x[1], reverse=True)[:5]
         except (nx.NetworkXError, nx.NetworkXException) as exc:  # FIX-4
             logger.debug("Betweenness centrality failed: %s", exc)
+=======
+    components = nx.number_weakly_connected_components(graph)
+    density = nx.density(graph)
+>>>>>>> ce28496 (v3 initiate)
 
-    group_counts: Dict[str, int] = {}
+    group_counts: dict[str, int] = {}
     for _, data in graph.nodes(data=True):
         g = data.get("group", "unknown")
         group_counts[g] = group_counts.get(g, 0) + 1
 
-    from geo import calculate_country_tensions
+    top_degree = sorted(degree_c.items(), key=lambda x: x[1], reverse=True)[:10]
+    top_betweenness = sorted(between_c.items(), key=lambda x: x[1], reverse=True)[:10]
 
     return {
-        "nodes": n,
-        "edges": e,
-        "density": round(nx.density(graph), 4),
+        "node_count": n,
+        "edge_count": e,
+        "density": round(density, 4),
+        "components": components,
+        "group_counts": group_counts,
         "top_degree": top_degree,
         "top_betweenness": top_betweenness,
-        "weakly_connected_components": nx.number_weakly_connected_components(graph),
-        "group_counts": group_counts,
-        "conflicts": detect_conflicts(graph),
-        "tensions": calculate_country_tensions(graph, custom_thresholds),
-        "health": graph_health_score(graph),
     }
 
 
-# ── Subgraph ──────────────────────────────────────────────────────────────────
-def get_ego_subgraph(graph: nx.DiGraph, node: str, hops: int = 2) -> nx.DiGraph:
-    if node not in graph:
-        return graph
-    undirected = graph.to_undirected()
-    reachable = nx.single_source_shortest_path_length(undirected, node, cutoff=hops)
-    return graph.subgraph(set(reachable.keys())).copy()
+# ── vis.js serialisation ──────────────────────────────────────────────────────
 
 
+<<<<<<< HEAD
 # ── Multi-hop Context Retrieval ────────────────────────────────────────────────
 def retrieve_graph_context(
     query: str, graph: nx.DiGraph, max_hops: int = 2, max_edges: int = 20
@@ -401,26 +547,175 @@ def retrieve_graph_context(
         edges = list(itertools.islice(graph.edges(data=True), max_edges))
         return "\n".join(
             f"- {u} → {d.get('label', 'connects to')} → {v}" for u, v, d in edges
+=======
+def graph_to_visjs(graph: nx.DiGraph) -> dict:
+    nodes = []
+    for node_id, data in graph.nodes(data=True):
+        nodes.append(
+            {
+                "id": node_id,
+                "label": node_id,
+                "group": data.get("group", "unknown"),
+                "confidence": data.get("confidence", 1.0),
+                "attributes": data.get("attributes", {}),
+                "ingested_at": data.get("ingested_at", ""),
+                "source_count": data.get("source_count", 1),
+                "tension_score": data.get("tension_score", 0.0),
+            }
+>>>>>>> ce28496 (v3 initiate)
         )
+    edges = []
+    for i, (src, tgt, data) in enumerate(graph.edges(data=True)):
+        edges.append(
+            {
+                "id": i,
+                "from": src,
+                "to": tgt,
+                "label": data.get("label", ""),
+                "confidence": data.get("confidence", 1.0),
+                "ingested_at": data.get("ingested_at", ""),
+            }
+        )
+    return {"nodes": nodes, "edges": edges}
 
-    return "\n".join(relevant[:max_edges])
+
+# ── Persistence (Fix #9) ──────────────────────────────────────────────────────
 
 
-# ── Export Helpers ────────────────────────────────────────────────────────────
-def export_json(graph: nx.DiGraph) -> str:
-    return json.dumps(nx.node_link_data(graph), indent=2)
+def _safe_save(graph: nx.DiGraph, path: str) -> None:
+    """
+    Atomic write: serialize → tmp file → fsync → rename.
+    Prevents corrupt graph state from partial writes or crashes.
+    """
+    data = {
+        "version": 2,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "nodes": [{"id": n, **d} for n, d in graph.nodes(data=True)],
+        "edges": [
+            {"source": s, "target": t, **d} for s, t, d in graph.edges(data=True)
+        ],
+    }
+    dir_name = os.path.dirname(os.path.abspath(path)) or "."
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=dir_name, delete=False, suffix=".tmp"
+        ) as tmp:
+            json.dump(data, tmp, ensure_ascii=False, indent=2)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            tmp_path = tmp.name
+        os.replace(tmp_path, path)  # atomic on POSIX; best-effort on Windows
+        log.debug(
+            "Graph persisted → %s (%d nodes, %d edges)",
+            path,
+            graph.number_of_nodes(),
+            graph.number_of_edges(),
+        )
+    except Exception as exc:
+        log.error("Failed to persist graph to %s: %s", path, exc)
+        # Clean up temp file if rename failed
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        raise
 
 
-def export_graphml(graph: nx.DiGraph) -> bytes:
-    buf = io.BytesIO()
-    nx.write_graphml(graph, buf)
-    return buf.getvalue()
+def save_graph(graph: Optional[nx.DiGraph] = None, path: str = GRAPH_PATH) -> None:
+    """Public save entrypoint. Defaults to the global graph."""
+    _safe_save(graph if graph is not None else _G, path)
 
 
-def export_csv(graph: nx.DiGraph) -> str:
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(["source", "target", "label", "confidence"])
-    for u, v, data in graph.edges(data=True):
-        writer.writerow([u, v, data.get("label", ""), data.get("confidence", "")])
-    return buf.getvalue()
+def load_graph(path: str = GRAPH_PATH) -> nx.DiGraph:
+    """
+    Load graph from *path*. Validates structure; falls back to empty graph
+    on corrupt / missing file without crashing the server (Fix #9).
+    """
+    global _G
+    if not os.path.exists(path):
+        log.info("No persisted graph at %s — starting fresh.", path)
+        _G = nx.DiGraph()
+        return _G
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        log.error(
+            "Corrupt graph file %s (%s) — backing up and starting fresh.", path, exc
+        )
+        backup = path + f".corrupt.{int(time.time())}"
+        try:
+            shutil.copy2(path, backup)
+            log.info("Corrupt file backed up → %s", backup)
+        except Exception:
+            pass
+        _G = nx.DiGraph()
+        return _G
+
+    g = nx.DiGraph()
+    for node in data.get("nodes", []):
+        node_id = node.pop("id", None)
+        if not node_id:
+            continue
+        g.add_node(node_id, **node)
+    for edge in data.get("edges", []):
+        src = edge.pop("source", None)
+        tgt = edge.pop("target", None)
+        if src and tgt:
+            g.add_edge(src, tgt, **edge)
+
+    log.info(
+        "Graph loaded from %s: %d nodes, %d edges",
+        path,
+        g.number_of_nodes(),
+        g.number_of_edges(),
+    )
+    _G = g
+    return _G
+
+
+# ── Snapshots ─────────────────────────────────────────────────────────────────
+
+
+def save_snapshot(graph: Optional[nx.DiGraph] = None, label: str = "") -> str:
+    """Save a timestamped copy of the current graph. Returns snapshot filename."""
+    g = graph if graph is not None else _G
+    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    fname = f"snapshot_{ts}.json"
+    path = os.path.join(SNAPSHOT_DIR, fname)
+    _safe_save(g, path)
+    log.info("Snapshot saved: %s", path)
+    return fname
+
+
+def list_snapshots() -> list[dict]:
+    if not os.path.isdir(SNAPSHOT_DIR):
+        return []
+    snaps = []
+    for fname in sorted(os.listdir(SNAPSHOT_DIR)):
+        if fname.endswith(".json"):
+            fpath = os.path.join(SNAPSHOT_DIR, fname)
+            try:
+                stat = os.stat(fpath)
+                snaps.append(
+                    {
+                        "id": fname,
+                        "filename": fname,
+                        "size": stat.st_size,
+                        "created": datetime.fromtimestamp(
+                            stat.st_mtime, tz=timezone.utc
+                        ).isoformat(),
+                    }
+                )
+            except OSError:
+                pass
+    return snaps
+
+
+def load_snapshot(snapshot_id: str) -> nx.DiGraph:
+    path = os.path.join(SNAPSHOT_DIR, snapshot_id)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Snapshot not found: {snapshot_id}")
+    return load_graph(path)

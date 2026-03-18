@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 """server.py — GOIES FastAPI Backend v4 (GQL + Embeddings + OSINT)
 
 Previous fixes (v4.0):
@@ -21,10 +22,26 @@ New fixes (v4.1):
   FIX-16  label_diversity zero-div / false-perfect score for empty edge labels (utils.py)
   FIX-17  Cross-session entity deduplication — extractor.py persists seen keys to disk;
           DELETE /api/extract/seen resets the cache when a clean ingest is needed
+=======
+"""
+server.py  —  GOIES FastAPI Backend
+=====================================
+Fixes wired in:
+  #1  All Ollama calls are now async (via fixed extractor.py + httpx)
+  #2  Timeout configurable via OLLAMA_TIMEOUT env var
+  #3  CancelToken per extraction task; DELETE /api/extract/{task_id} cancels it
+  #4  DELETE /api/graph calls utils.clear_graph() — wipes backend state
+  #5  Parallel chunk processing transparent via extractor.extract_text()
+  #6  Edge parsing fixed in extractor.py
+  #7  POST /api/extract/stream yields incremental SSE per chunk
+  #8  startup_event() calls extractor.warmup_model()
+  #9  Atomic graph save/load in utils.py
+>>>>>>> ce28496 (v3 initiate)
 """
 
 from __future__ import annotations
 
+<<<<<<< HEAD
 import ast
 import asyncio
 import html
@@ -114,11 +131,101 @@ GROUP_COLORS: Dict[str, str] = {
     "resource":     "#56d364",
     "unknown":      "#8b949e",
 }
+=======
+import asyncio
+import logging
+import os
+import time
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import AsyncIterator, Optional
+
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+from extractor import (
+    CancelToken,
+    ChunkResult,
+    Entity,
+    Relationship,
+    extract_stream,
+    extract_text,
+    warmup_model,
+)
+from utils import (
+    add_edge,
+    add_node,
+    clear_graph,
+    get_graph,
+    get_graph_analytics,
+    graph_to_visjs,
+    list_snapshots,
+    load_graph,
+    load_snapshot,
+    merge_nodes,
+    save_graph,
+    save_snapshot,
+)
+
+log = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(name)s  %(message)s")
+
+DEFAULT_MODEL = os.getenv("GOIES_DEFAULT_MODEL", "llama3.2")
+
+# ── In-flight extraction tasks (Fix #3) ───────────────────────────────────────
+
+_active_tasks: dict[str, CancelToken] = {}
+
+# ── Lifespan (Fix #8) ─────────────────────────────────────────────────────────
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Load persisted graph on startup (Fix #9)
+    load_graph()
+    log.info("Graph loaded from disk.")
+
+    # Warm up the default model (Fix #8)
+    asyncio.create_task(warmup_model(DEFAULT_MODEL))
+
+    yield
+
+    # Persist graph on clean shutdown (Fix #9)
+    save_graph()
+    log.info("Graph persisted on shutdown.")
+
+
+# ── App ───────────────────────────────────────────────────────────────────────
+
+app = FastAPI(
+    title="GOIES API",
+    version="2.0.0",
+    description="Geopolitical Open Intelligence & Extraction System",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    lifespan=lifespan,
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Serve frontend static files
+if os.path.isdir("frontend"):
+    app.mount("/static", StaticFiles(directory="frontend"), name="frontend")
+>>>>>>> ce28496 (v3 initiate)
 
 # ── Rate Limiter (no external dependency) ─────────────────────────────────────
 # FIX-12: Simple token-bucket rate limiter — no slowapi/Redis dependency needed.
 # Per-IP sliding-window counters stored in memory (fine for single-process local deploy).
 
+<<<<<<< HEAD
 class _RateLimiter:
     _PRUNE_INTERVAL = 300   # seconds between stale-key sweeps
 
@@ -376,25 +483,48 @@ def _update_graph(extractions) -> dict:
 
 
 # ── Request Models ─────────────────────────────────────────────────────────────
-class ExtractRequest(BaseModel):
-    text: str
-    model: str = "llama3.2"
-    persona: str = "senior geopolitical intelligence analyst"
+=======
+# ── Pydantic request/response models ─────────────────────────────────────────
 
+
+>>>>>>> ce28496 (v3 initiate)
+class ExtractRequest(BaseModel):
+    text: str = Field(..., min_length=10)
+    model: str = Field(DEFAULT_MODEL)
+
+<<<<<<< HEAD
 class QueryRequest(BaseModel):
     question: str
     model: str = "llama3.2"
     persona: str = "senior geopolitical intelligence analyst"
+=======
+
+class ExtractResponse(BaseModel):
+    task_id: str
+    entities: list[dict]
+    relationships: list[dict]
+    elapsed: float
+    chunks: int
+
+
+class GraphClearResponse(BaseModel):
+    cleared: bool
+    message: str
+
+
+class MergeRequest(BaseModel):
+    keep_id: str
+    drop_id: str
+>>>>>>> ce28496 (v3 initiate)
 
 class SimulateRequest(BaseModel):
     scenario: str
-    model: str = "llama3.2"
-    persona: str = "strategic policy simulator"
+    model: str = DEFAULT_MODEL
 
 class ForecastRequest(BaseModel):
-    model: str = "llama3.2"
-    focus: str = ""
+    model: str = DEFAULT_MODEL
 
+<<<<<<< HEAD
 class UrlIngestRequest(BaseModel):
     url: str
 
@@ -414,10 +544,18 @@ class ExtractUrlRequest(BaseModel):
 class MergeRequest(BaseModel):
     source: str
     target: str
+=======
+
+class QueryRequest(BaseModel):
+    query: str
+    model: str = DEFAULT_MODEL
+
+>>>>>>> ce28496 (v3 initiate)
 
 class GQLRequest(BaseModel):
     query: str
 
+<<<<<<< HEAD
 class FeedRequest(BaseModel):
     url: str
     name: str = ""
@@ -1048,33 +1186,456 @@ def embed_clusters(n: int = 5):
 
 
 # ── OSINT ──────────────────────────────────────────────────────────────────────
+=======
+
+class OsintFeedRequest(BaseModel):
+    url: str
+
+
+class EmbedTrainRequest(BaseModel):
+    dimensions: int = 64
+    walk_length: int = 30
+    num_walks: int = 200
+
+
+class ReportRequest(BaseModel):
+    format: str = "pdf"  # "pdf" | "md"
+    entities: list[str] = []
+    include_graph: bool = True
+    include_forecast: bool = True
+
+
+class WatchListRequest(BaseModel):
+    thresholds: dict[str, float]
+
+
+# ── Health ────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/health")
+async def health() -> dict:
+    import httpx
+
+    ollama_ok = False
+    models: list[str] = []
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                f"{os.getenv('OLLAMA_HOST', 'http://localhost:11434')}/api/tags",
+                timeout=5.0,
+            )
+            r.raise_for_status()
+            models = [m["name"] for m in r.json().get("models", [])]
+            ollama_ok = True
+    except Exception as exc:
+        log.warning("Ollama health check failed: %s", exc)
+
+    g = get_graph()
+    return {
+        "status": "ok" if ollama_ok else "degraded",
+        "ollama_ok": ollama_ok,
+        "models": models,
+        "graph_nodes": g.number_of_nodes(),
+        "graph_edges": g.number_of_edges(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/api/models")
+async def list_models() -> dict:
+    import httpx
+
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                f"{os.getenv('OLLAMA_HOST', 'http://localhost:11434')}/api/tags",
+                timeout=5.0,
+            )
+            r.raise_for_status()
+            return {"models": [m["name"] for m in r.json().get("models", [])]}
+    except Exception as exc:
+        raise HTTPException(502, f"Cannot reach Ollama: {exc}") from exc
+
+
+# ── Extraction (Fixes #1 #2 #3 #5 #6 #7) ─────────────────────────────────────
+
+
+@app.post("/api/extract", response_model=ExtractResponse)
+async def extract(req: ExtractRequest) -> ExtractResponse:
+    """Synchronous extraction — waits for all chunks, returns full result."""
+    task_id = str(uuid.uuid4())
+    cancel = CancelToken()
+    _active_tasks[task_id] = cancel
+
+    t0 = time.perf_counter()
+    g = get_graph()
+
+    chunks_processed = [0]
+
+    def on_chunk(result: ChunkResult) -> None:
+        # Fix #7: incrementally commit each chunk to the graph as it arrives
+        for ent in result.entities:
+            add_node(g, ent.id, ent.group, ent.confidence, ent.attributes)
+        for rel in result.relationships:
+            # Ensure endpoint nodes exist before adding edge (Fix #6)
+            if rel.from_id not in g:
+                add_node(g, rel.from_id)
+            if rel.to_id not in g:
+                add_node(g, rel.to_id)
+            add_edge(g, rel.from_id, rel.to_id, rel.label, rel.confidence)
+        chunks_processed[0] += 1
+
+    try:
+        entities, relationships = await extract_text(
+            req.text, req.model, cancel, on_chunk=on_chunk
+        )
+    except asyncio.CancelledError:
+        raise HTTPException(409, "Extraction cancelled")
+    finally:
+        _active_tasks.pop(task_id, None)
+
+    save_graph(g)  # Fix #9: atomic persist after extraction
+
+    return ExtractResponse(
+        task_id=task_id,
+        entities=[
+            {
+                "id": e.id,
+                "group": e.group,
+                "confidence": e.confidence,
+                "attributes": e.attributes,
+            }
+            for e in entities
+        ],
+        relationships=[
+            {
+                "from": r.from_id,
+                "to": r.to_id,
+                "label": r.label,
+                "confidence": r.confidence,
+            }
+            for r in relationships
+        ],
+        elapsed=round(time.perf_counter() - t0, 2),
+        chunks=chunks_processed[0],
+    )
+
+
+@app.delete("/api/extract/{task_id}", status_code=200)
+async def cancel_extraction(task_id: str) -> dict:
+    """Fix #3: Cancel an in-flight extraction task by its task_id."""
+    token = _active_tasks.get(task_id)
+    if not token:
+        raise HTTPException(404, f"No active task with id={task_id}")
+    token.cancel()
+    return {"cancelled": True, "task_id": task_id}
+
+
+@app.post("/api/extract/stream")
+async def extract_stream_endpoint(req: ExtractRequest) -> StreamingResponse:
+    """
+    Fix #7: Server-Sent Events stream — yields one event per chunk as it finishes.
+    The frontend can update the graph incrementally without waiting for all chunks.
+    """
+    task_id = str(uuid.uuid4())
+    cancel = CancelToken()
+    _active_tasks[task_id] = cancel
+
+    g = get_graph()
+
+    async def event_generator() -> AsyncIterator[str]:
+        try:
+            async for event in extract_stream(req.text, req.model, cancel):
+                # Commit new entities/relationships to the graph immediately
+                if event.get("type") == "chunk":
+                    for ent in event.get("new_entities", []):
+                        add_node(
+                            g,
+                            ent["id"],
+                            ent.get("group", "unknown"),
+                            ent.get("confidence", 1.0),
+                            ent.get("attributes", {}),
+                        )
+                    for rel in event.get("new_relationships", []):
+                        frm = rel.get("from", "")
+                        to = rel.get("to", "")
+                        if frm and to:
+                            if frm not in g:
+                                add_node(g, frm)
+                            if to not in g:
+                                add_node(g, to)
+                            add_edge(
+                                g,
+                                frm,
+                                to,
+                                rel.get("label", "related"),
+                                rel.get("confidence", 1.0),
+                            )
+
+                if event.get("type") == "done":
+                    save_graph(g)  # Fix #9: persist after stream completes
+
+                import json as _json
+
+                yield f"data: {_json.dumps({'task_id': task_id, **event})}\n\n"
+        except asyncio.CancelledError:
+            yield f"data: {{}}\n\n"
+        finally:
+            _active_tasks.pop(task_id, None)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "X-Task-Id": task_id,
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ── Ingest helpers ────────────────────────────────────────────────────────────
+
+
+@app.post("/api/ingest/url")
+async def ingest_url(
+    url: str = Query(...),
+    model: str = Query(DEFAULT_MODEL),
+) -> dict:
+    try:
+        from ingestor import fetch_url_text
+
+        text = await asyncio.to_thread(fetch_url_text, url)
+    except Exception as exc:
+        raise HTTPException(400, f"URL fetch failed: {exc}") from exc
+    req = ExtractRequest(text=text, model=model)
+    return await extract(req)
+
+
+@app.post("/api/ingest/file")
+async def ingest_file(
+    file: UploadFile = File(...),
+    model: str = Query(DEFAULT_MODEL),
+) -> dict:
+    try:
+        from ingestor import extract_file_text
+
+        raw = await file.read()
+        text = extract_file_text(raw, file.filename or "")
+    except Exception as exc:
+        raise HTTPException(400, f"File extraction failed: {exc}") from exc
+    req = ExtractRequest(text=text, model=model)
+    return await extract(req)
+
+
+# ── Graph (Fix #4) ────────────────────────────────────────────────────────────
+
+
+@app.get("/api/graph")
+async def get_graph_endpoint(
+    ego: Optional[str] = Query(None),
+    hops: int = Query(2),
+) -> dict:
+    g = get_graph()
+    if ego and ego in g:
+        from graph_algo import ego_subgraph
+
+        sub = ego_subgraph(g, ego, hops)
+        vis = graph_to_visjs(sub)
+    else:
+        vis = graph_to_visjs(g)
+    return {**vis, "analytics": get_graph_analytics(g)}
+
+
+@app.delete("/api/graph", response_model=GraphClearResponse)
+async def delete_graph() -> GraphClearResponse:
+    """
+    Fix #4: Clears both the backend NetworkX graph AND persists the empty state.
+    Previously only the frontend received a clear signal.
+    """
+    clear_graph()
+    return GraphClearResponse(
+        cleared=True,
+        message="Graph cleared — backend state reset and persisted to disk.",
+    )
+
+
+@app.get("/api/path")
+async def shortest_path(
+    src: str = Query(...),
+    tgt: str = Query(...),
+) -> dict:
+    from graph_algo import find_path
+
+    g = get_graph()
+    path = find_path(g, src, tgt)
+    if path is None:
+        raise HTTPException(404, f"No path from '{src}' to '{tgt}'")
+    return {"path": path}
+
+
+@app.post("/api/node/merge")
+async def merge_nodes_endpoint(req: MergeRequest) -> dict:
+    g = get_graph()
+    ok = merge_nodes(g, req.keep_id, req.drop_id)
+    if not ok:
+        raise HTTPException(404, "One or both nodes not found")
+    save_graph(g)
+    return {"merged": True, "kept": req.keep_id, "dropped": req.drop_id}
+
+
+@app.get("/api/export/{fmt}")
+async def export_graph(fmt: str) -> StreamingResponse:
+    from graph_algo import export_graph as _export
+
+    g = get_graph()
+    try:
+        content, media_type, filename = _export(g, fmt)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return StreamingResponse(
+        iter([content]),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ── Intelligence routes ───────────────────────────────────────────────────────
+
+
+@app.post("/api/query")
+async def graph_query(req: QueryRequest) -> dict:
+    from query_engine import run_query
+
+    g = get_graph()
+    result = await asyncio.to_thread(run_query, g, req.query, req.model)
+    return {"answer": result}
+
+
+@app.post("/api/simulate")
+async def simulate(req: SimulateRequest) -> dict:
+    from simulator import run_simulation
+
+    g = get_graph()
+    result = await asyncio.to_thread(run_simulation, g, req.scenario, req.model)
+    return result
+
+
+@app.post("/api/forecast")
+async def forecast(req: ForecastRequest) -> dict:
+    from forecaster import run_forecast
+
+    g = get_graph()
+    result = await asyncio.to_thread(run_forecast, g, req.model)
+    return result
+
+
+@app.get("/api/narrative/summary")
+async def narrative_summary(model: str = Query(DEFAULT_MODEL)) -> dict:
+    from query_engine import generate_summary
+
+    g = get_graph()
+    summary = await asyncio.to_thread(generate_summary, g, model)
+    return {"summary": summary}
+
+
+@app.post("/api/report")
+async def generate_report(req: ReportRequest) -> StreamingResponse:
+    from reporter import build_report
+
+    g = get_graph()
+    content, media_type, filename = await asyncio.to_thread(
+        build_report,
+        g,
+        req.format,
+        req.entities,
+        req.include_graph,
+        req.include_forecast,
+    )
+    return StreamingResponse(
+        iter([content]),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ── Geo ───────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/geo")
+async def geo_markers() -> dict:
+    from geo import get_geo_markers
+
+    g = get_graph()
+    markers = get_geo_markers(g)
+    return {"markers": markers}
+
+
+# ── Snapshots ─────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/snapshots")
+async def get_snapshots() -> dict:
+    return {"snapshots": list_snapshots()}
+
+
+@app.get("/api/snapshots/timeline")
+async def snapshots_timeline() -> dict:
+    snaps = list_snapshots()
+    return {"timeline": snaps}
+
+
+@app.get("/api/snapshots/{snapshot_id}")
+async def load_snapshot_endpoint(snapshot_id: str) -> dict:
+    try:
+        g = load_snapshot(snapshot_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {**graph_to_visjs(g), "analytics": get_graph_analytics(g)}
+
+
+@app.post("/api/snapshots")
+async def create_snapshot(label: str = Query("")) -> dict:
+    fname = save_snapshot(get_graph(), label)
+    return {"snapshot_id": fname}
+
+
+# ── OSINT ─────────────────────────────────────────────────────────────────────
+
+
+>>>>>>> ce28496 (v3 initiate)
 @app.get("/api/osint/status")
-def osint_status():
-    return osint_engine.get_status()
+async def osint_status() -> dict:
+    from osint_engine import get_status
+
+    return get_status()
 
 
 @app.get("/api/osint/feeds")
-def osint_get_feeds():
-    return {"feeds": osint_engine.get_feeds()}
+async def list_feeds() -> dict:
+    from osint_engine import list_feeds as _lf
+
+    return {"feeds": _lf()}
 
 
-@app.post("/api/osint/feeds")
-def osint_add_feed(req: FeedRequest):
-    added = osint_engine.add_feed(req.url, req.name)
-    if not added:
-        raise HTTPException(409, f"Feed already exists: {req.url}")
-    return {"status": "added", "url": req.url, "name": req.name}
+@app.post("/api/osint/feeds", status_code=201)
+async def add_feed(req: OsintFeedRequest) -> dict:
+    from osint_engine import add_feed as _af
+
+    _af(req.url)
+    return {"added": True, "url": req.url}
 
 
 @app.delete("/api/osint/feeds")
-def osint_remove_feed(url: str):
-    removed = osint_engine.remove_feed(url)
-    if not removed:
-        raise HTTPException(404, f"Feed not found: {url}")
-    return {"status": "removed", "url": url}
+async def remove_feed(url: str = Query(...)) -> dict:
+    from osint_engine import remove_feed as _rf
+
+    _rf(url)
+    return {"removed": True, "url": url}
 
 
 @app.post("/api/osint/ingest")
+<<<<<<< HEAD
 async def osint_ingest(req: OsintIngestRequest, background_tasks: BackgroundTasks, request: Request):
     _check_rate(request, max_req=3, window=60)
     if osint_engine._running:
@@ -1360,12 +1921,156 @@ async def osint_gdelt(entity: str, days: int = 7):
     days = max(1, min(days, 90))  # clamp: 0 days is nonsensical; >90 is too broad
     articles = await osint_engine.query_gdelt(entity, days)
     return {"entity": entity, "articles": articles, "count": len(articles)}
+=======
+async def osint_ingest(
+    background_tasks: BackgroundTasks,
+    model: str = Query(DEFAULT_MODEL),
+) -> dict:
+    from osint_engine import ingest_feeds
+
+    async def _run() -> None:
+        articles = await asyncio.to_thread(ingest_feeds)
+        for text in articles:
+            if text:
+                req = ExtractRequest(text=text, model=model)
+                try:
+                    await extract(req)
+                except Exception as exc:
+                    log.warning("OSINT ingest extraction error: %s", exc)
+
+    background_tasks.add_task(_run)
+    return {"status": "ingestion_started"}
 
 
-# ── Static SPA ─────────────────────────────────────────────────────────────────
-_static = pathlib.Path(__file__).parent / "frontend"
-_static.mkdir(exist_ok=True)
-app.mount("/", StaticFiles(directory=str(_static), html=True), name="static")
+@app.post("/api/osint/enrich/{node_id}")
+async def enrich_node(node_id: str) -> dict:
+    from osint_engine import enrich_wikipedia
 
+    g = get_graph()
+    if node_id not in g:
+        raise HTTPException(404, f"Node '{node_id}' not found")
+    attrs = await asyncio.to_thread(enrich_wikipedia, node_id)
+    if attrs:
+        g.nodes[node_id].setdefault("attributes", {}).update(attrs)
+        save_graph(g)
+    return {"enriched": bool(attrs), "node_id": node_id, "attributes": attrs}
+
+
+@app.get("/api/osint/gdelt")
+async def gdelt_query(
+    entity: str = Query(...),
+    days: int = Query(7),
+    model: str = Query(DEFAULT_MODEL),
+) -> dict:
+    from osint_engine import query_gdelt
+
+    articles = await asyncio.to_thread(query_gdelt, entity, days)
+    count = 0
+    for text in articles:
+        if text:
+            req = ExtractRequest(text=text, model=model)
+            try:
+                await extract(req)
+                count += 1
+            except Exception as exc:
+                log.warning("GDELT extraction error: %s", exc)
+    return {"ingested": count, "entity": entity, "days": days}
+>>>>>>> ce28496 (v3 initiate)
+
+
+# ── Embeddings ────────────────────────────────────────────────────────────────
+
+<<<<<<< HEAD
 if __name__ == "__main__":
     uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+=======
+
+@app.post("/api/embed/train")
+async def train_embeddings(
+    req: EmbedTrainRequest, background_tasks: BackgroundTasks
+) -> dict:
+    from embedding_engine import train_embeddings as _train
+
+    background_tasks.add_task(
+        asyncio.to_thread,
+        _train,
+        get_graph(),
+        req.dimensions,
+        req.walk_length,
+        req.num_walks,
+    )
+    return {"status": "training_started"}
+
+
+@app.get("/api/embed/status")
+async def embed_status() -> dict:
+    from embedding_engine import get_status as _gs
+
+    return _gs()
+
+
+@app.get("/api/embed/similar/{node_id}")
+async def similar_nodes(node_id: str, k: int = Query(5)) -> dict:
+    from embedding_engine import find_similar
+
+    results = find_similar(node_id, k)
+    return {"node_id": node_id, "similar": results}
+
+
+@app.get("/api/embed/search")
+async def semantic_search(q: str = Query(...), k: int = Query(5)) -> dict:
+    from embedding_engine import semantic_search as _ss
+
+    results = _ss(q, k)
+    return {"query": q, "results": results}
+
+
+@app.get("/api/embed/clusters")
+async def graph_clusters(n: int = Query(5)) -> dict:
+    from embedding_engine import cluster_graph
+
+    clusters = cluster_graph(get_graph(), n)
+    return {"clusters": clusters}
+
+
+# ── GQL ───────────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/gql")
+async def run_gql(req: GQLRequest) -> dict:
+    from query_engine import run_gql as _rg
+
+    result = await asyncio.to_thread(_rg, get_graph(), req.query)
+    return {"result": result}
+
+
+@app.get("/api/gql/help")
+async def gql_help() -> dict:
+    from query_engine import GQL_HELP
+
+    return {"help": GQL_HELP}
+
+
+# ── Watch list ────────────────────────────────────────────────────────────────
+
+_watch_list: dict[str, float] = {}
+
+
+@app.post("/api/watch_list")
+async def update_watch_list(req: WatchListRequest) -> dict:
+    _watch_list.update(req.thresholds)
+    return {"watch_list": _watch_list}
+
+
+# ── Root ──────────────────────────────────────────────────────────────────────
+
+
+@app.get("/")
+async def root() -> dict:
+    return {
+        "name": "GOIES",
+        "version": "2.0.0",
+        "docs": "/api/docs",
+        "status": "running",
+    }
+>>>>>>> ce28496 (v3 initiate)

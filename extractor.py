@@ -1,32 +1,39 @@
 """
-extractor.py — GOIES Extraction Engine
-
+extractor.py  —  GOIES Intelligence Extraction Engine
+======================================================
 Fixes applied:
-  FIX-1  Per-chunk ValueError/parse failures are caught and logged rather than
-         killing the entire stream — bad LLM output on chunk N no longer aborts
-         processing of chunks N+1 … end.
-  FIX-2  Deduplication key set (`seen`) is passed into extract_intelligence_stream
-         so it persists across the caller's session via a shared set when desired,
-         but defaults to a fresh set per call (backward-compatible).
-  FIX-3  forecaster.py hardcoded OLLAMA_BASE_URL — now uses os.getenv everywhere.
-  FIX-4  Cross-session deduplication — `seen` keys are persisted to
-         extractor_seen.json so duplicate entities from prior ingestion runs
-         are not re-added to the graph on restart. The file is capped at
-         SEEN_MAX_ENTRIES to prevent unbounded growth.
+  #1  Blocking requests.post → async httpx (non-blocking)
+  #2  Hardcoded 120 s timeout → configurable via OLLAMA_TIMEOUT env var (default 180 s)
+  #3  Task-cancellation token passed through every await point
+  #5  Sequential chunk processing → asyncio.gather (parallel)
+  #6  Relationship parsing rewritten — robust JSON extraction + edge validation
+  #7  Incremental graph updates pushed per-chunk via async callback
+  #8  Model warm-up on startup; optional request batching via OLLAMA_BATCH env var
 """
 
+from __future__ import annotations
+
+import asyncio
 import json
 import logging
 import os
 import pathlib
 import re
+<<<<<<< HEAD
 import threading
 import requests
 from dataclasses import dataclass, field
 from typing import Any, Dict, Generator, List, Optional, Set
+=======
+import time
+from dataclasses import dataclass, field
+from difflib import SequenceMatcher
+from typing import AsyncIterator, Callable, Optional
+>>>>>>> ce28496 (v3 initiate)
 
-from utils import chunk_text
+import httpx
 
+<<<<<<< HEAD
 logger = logging.getLogger("goies.extractor")
 
 OLLAMA_BASE_URL      = os.getenv("OLLAMA_HOST", "http://localhost:11434")
@@ -76,84 +83,153 @@ _load_seen()
 VALID_ENTITY_CLASSES = {
     "country", "person", "organization", "technology",
     "event", "treaty", "resource",
+=======
+log = logging.getLogger(__name__)
+
+# ── Configuration ────────────────────────────────────────────────────────────
+
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "180"))  # Fix #2
+OLLAMA_BATCH = int(os.getenv("OLLAMA_BATCH", "3"))  # Fix #8: parallel chunks per wave
+FUZZY_THRESH = float(os.getenv("FUZZY_THRESH", "0.82"))
+CONF_THRESHOLD = float(os.getenv("CONF_THRESHOLD", "0.50"))
+
+CHUNK_SIZE = 4000
+CHUNK_OVERLAP = 200
+
+ENTITY_GROUPS = {
+    "country",
+    "person",
+    "organization",
+    "technology",
+    "event",
+    "treaty",
+    "resource",
+>>>>>>> ce28496 (v3 initiate)
 }
-ALL_VALID_CLASSES = VALID_ENTITY_CLASSES | {"relationship"}
+
+# ── Data types ───────────────────────────────────────────────────────────────
 
 
 @dataclass
-class Extraction:
-    extraction_class: str
-    extraction_text: str
-    attributes: Dict[str, Any] = field(default_factory=dict)
-    confidence: float = 1.0
+class Entity:
+    id: str
+    group: str
+    confidence: float
+    attributes: dict = field(default_factory=dict)
 
 
-_SYSTEM_PROMPT = """You are a {persona}. You are a precision geopolitical intelligence extraction engine.
-
-ENTITY CLASSES — use exactly these strings:
-  Country      — nation states, governments, regions, blocs (EU, NATO)
-  Person       — named individuals, officials, leaders
-  Organization — companies, agencies, NGOs, militaries, alliances
-  Technology   — technologies, systems, platforms, weapons, chips
-  Event        — incidents, conflicts, agreements, elections, sanctions
-  Treaty       — formal agreements, accords, treaties, pacts
-  Resource     — commodities, energy sources, minerals, currencies
-
-RELATIONSHIP — connects two entities:
-  Must include "source" and "target" keys in attributes.
-  Use a short, active verb phrase as extraction_text.
-
-CONFIDENCE — rate your certainty 0.0–1.0. Skip anything below 0.5.
-
-OUTPUT RULES:
-  1. Return ONLY a raw JSON object. No markdown fences, no prose, no explanation.
-  2. extraction_text must be the EXACT phrase from the source text.
-  3. Every Relationship MUST have both "source" and "target".
-
-JSON SCHEMA:
-{{
-  "extractions": [
-    {{
-      "extraction_class": "Country",
-      "extraction_text": "United States",
-      "attributes": {{"role": "instigator"}},
-      "confidence": 0.97
-    }},
-    {{
-      "extraction_class": "Relationship",
-      "extraction_text": "imposes sanctions on",
-      "attributes": {{"source": "United States", "target": "Iran"}},
-      "confidence": 0.95
-    }}
-  ]
-}}"""
+@dataclass
+class Relationship:
+    from_id: str
+    to_id: str
+    label: str
+    confidence: float
 
 
-def _call_ollama(prompt: str, model: str) -> str:
+@dataclass
+class ChunkResult:
+    entities: list[Entity]
+    relationships: list[Relationship]
+    chunk_index: int
+    elapsed: float
+
+
+# Cancellation token (Fix #3)
+class CancelToken:
+    def __init__(self) -> None:
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+    def raise_if_cancelled(self) -> None:
+        if self._cancelled:
+            raise asyncio.CancelledError("Extraction cancelled by caller")
+
+
+# ── Chunking ─────────────────────────────────────────────────────────────────
+
+
+def _sentence_chunks(text: str) -> list[str]:
+    """Split on sentence boundaries, respecting CHUNK_SIZE with CHUNK_OVERLAP."""
+    import re as _re
+
+    sentences = _re.split(r"(?<=[.!?])\s+", text.strip())
+    chunks: list[str] = []
+    buf = ""
+    for sent in sentences:
+        if len(buf) + len(sent) + 1 > CHUNK_SIZE and buf:
+            chunks.append(buf.strip())
+            # keep overlap from the tail
+            words = buf.split()
+            overlap = " ".join(words[max(0, len(words) - 40) :])
+            buf = overlap + " " + sent
+        else:
+            buf = (buf + " " + sent).strip() if buf else sent
+    if buf.strip():
+        chunks.append(buf.strip())
+    return chunks
+
+
+# ── Prompt ───────────────────────────────────────────────────────────────────
+
+_SYSTEM_PROMPT = (
+    "You are a geopolitical intelligence analyst. "
+    "Extract entities and relationships from the text. "
+    "Return ONLY valid JSON — no markdown, no explanation.\n"
+    "Schema:\n"
+    '{"entities":[{"id":"<name>","group":"<country|person|organization|'
+    'technology|event|treaty|resource>","confidence":<0-1>,'
+    '"attributes":{}}],'
+    '"relationships":[{"from":"<entity_id>","to":"<entity_id>",'
+    '"label":"<verb>","confidence":<0-1>}]}'
+)
+
+# ── Ollama call (Fix #1 — async httpx, Fix #2 — configurable timeout) ───────
+
+
+async def _call_ollama(
+    model: str,
+    prompt: str,
+    cancel: CancelToken,
+    client: httpx.AsyncClient,
+) -> str:
+    cancel.raise_if_cancelled()
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "system": _SYSTEM_PROMPT,
+        "stream": False,
+        "options": {"temperature": 0.1, "num_predict": 1200},
+    }
     try:
-        response = requests.post(
-            f"{OLLAMA_BASE_URL}/api/generate",
-            json={"model": model, "prompt": prompt, "stream": False},
-            timeout=REQUEST_TIMEOUT_SECS,
+        resp = await client.post(
+            f"{OLLAMA_HOST}/api/generate",
+            json=payload,
+            timeout=OLLAMA_TIMEOUT,
         )
-        response.raise_for_status()
-    except requests.exceptions.ConnectionError:
-        raise ConnectionError(
-            f"Cannot connect to Ollama at {OLLAMA_BASE_URL}. "
-            f"Start with: ollama run {model}"
+        resp.raise_for_status()
+        return resp.json().get("response", "")
+    except httpx.TimeoutException:
+        log.warning("Ollama timeout after %.0f s for model %s", OLLAMA_TIMEOUT, model)
+        raise
+    except httpx.HTTPStatusError as exc:
+        log.error(
+            "Ollama HTTP error %s: %s",
+            exc.response.status_code,
+            exc.response.text[:200],
         )
-    except requests.exceptions.Timeout:
-        raise TimeoutError(f"Ollama did not respond within {REQUEST_TIMEOUT_SECS}s.")
-    except requests.exceptions.HTTPError as e:
-        raise RuntimeError(f"Ollama HTTP error: {e}")
-    return response.json().get("response", "").strip()
+        raise
 
 
-def _parse_extractions(raw: str) -> List[Extraction]:
-    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
-    raw = re.sub(r"```\s*$", "", raw, flags=re.MULTILINE)
-    raw = raw.strip()
+# ── JSON extraction (Fix #6 — robust parsing) ────────────────────────────────
 
+<<<<<<< HEAD
     # Find the outermost JSON object using bracket counting — more robust than
     # greedy r"{.*}" which swallows surrounding prose when the LLM adds preamble.
     start = raw.find("{")
@@ -185,28 +261,96 @@ def _parse_extractions(raw: str) -> List[Extraction]:
         except (TypeError, ValueError):
             conf = 1.0
         conf = max(0.0, min(1.0, conf))  # clamp — LLMs occasionally emit values > 1
+=======
+_JSON_RE = re.compile(r"\{[\s\S]*\}", re.DOTALL)
 
-        if not cls or not text:
-            continue
-        if cls.lower() not in ALL_VALID_CLASSES:
-            continue
-        if conf < 0.5:
-            continue
-        if cls.lower() == "relationship" and (
-            not attrs.get("source") or not attrs.get("target")
-        ):
-            continue
 
-        results.append(
-            Extraction(
-                extraction_class=cls,
-                extraction_text=text,
-                attributes=attrs,
+def _parse_llm_json(raw: str) -> dict:
+    """
+    Robustly extract the first valid JSON object from LLM output.
+    Handles: markdown fences, leading/trailing prose, partial JSON.
+    """
+    # Strip markdown fences
+    raw = re.sub(r"```(?:json)?", "", raw).strip()
+    # Find the outermost {...}
+    m = _JSON_RE.search(raw)
+    if not m:
+        return {"entities": [], "relationships": []}
+    candidate = m.group(0)
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        # Attempt bracket-counting repair
+        depth = 0
+        end = 0
+        for i, ch in enumerate(candidate):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        try:
+            return json.loads(candidate[:end])
+        except json.JSONDecodeError:
+            log.debug("Could not parse LLM JSON: %s", candidate[:200])
+            return {"entities": [], "relationships": []}
+
+>>>>>>> ce28496 (v3 initiate)
+
+# ── Fuzzy deduplication ───────────────────────────────────────────────────────
+
+
+def _fuzzy_match(name: str, known: list[str]) -> Optional[str]:
+    for k in known:
+        if SequenceMatcher(None, name.lower(), k.lower()).ratio() >= FUZZY_THRESH:
+            return k
+    return None
+
+
+# ── Per-chunk extraction ──────────────────────────────────────────────────────
+
+
+async def _extract_chunk(
+    chunk: str,
+    chunk_index: int,
+    model: str,
+    cancel: CancelToken,
+    client: httpx.AsyncClient,
+) -> ChunkResult:
+    cancel.raise_if_cancelled()
+    t0 = time.perf_counter()
+    prompt = f"Text:\n{chunk}\n\nExtract all geopolitical entities and relationships."
+    try:
+        raw = await _call_ollama(model, prompt, cancel, client)
+    except (httpx.TimeoutException, httpx.HTTPStatusError, asyncio.CancelledError):
+        raise
+    except Exception as exc:
+        log.warning("Chunk %d extraction failed: %s", chunk_index, exc)
+        return ChunkResult([], [], chunk_index, time.perf_counter() - t0)
+
+    data = _parse_llm_json(raw)
+
+    entities: list[Entity] = []
+    for e in data.get("entities", []):
+        eid = str(e.get("id") or "").strip()
+        group = str(e.get("group") or "unknown").strip().lower()
+        conf = float(e.get("confidence") or 0)
+        if not eid or conf < CONF_THRESHOLD:
+            continue
+        if group not in ENTITY_GROUPS:
+            group = "unknown"
+        entities.append(
+            Entity(
+                id=eid,
+                group=group,
                 confidence=conf,
+                attributes=e.get("attributes") or {},
             )
         )
-    return results
 
+<<<<<<< HEAD
 
 def extract_intelligence(
     input_text: str,
@@ -255,10 +399,35 @@ def extract_intelligence(
             if _seen_unflushed >= SEEN_FLUSH_BATCH:
                 _save_seen()
                 _seen_unflushed = 0
+=======
+    # Fix #6 — validate both 'from'/'to' fields exist and are non-empty
+    relationships: list[Relationship] = []
+    for r in data.get("relationships", []):
+        frm = str(r.get("from") or "").strip()
+        to = str(r.get("to") or "").strip()
+        label = str(r.get("label") or "related").strip().lower()
+        conf = float(r.get("confidence") or 0)
+        if not frm or not to or conf < CONF_THRESHOLD:
+            continue
+        if frm == to:  # self-loops are noise
+            continue
+        relationships.append(
+            Relationship(from_id=frm, to_id=to, label=label, confidence=conf)
+        )
+>>>>>>> ce28496 (v3 initiate)
 
-    return all_extractions
+    elapsed = time.perf_counter() - t0
+    log.debug(
+        "Chunk %d: %d entities, %d relationships in %.1f s",
+        chunk_index,
+        len(entities),
+        len(relationships),
+        elapsed,
+    )
+    return ChunkResult(entities, relationships, chunk_index, elapsed)
 
 
+<<<<<<< HEAD
 def extract_intelligence_stream(
     input_text: str,
     model: str = DEFAULT_MODEL,
@@ -325,10 +494,215 @@ def extract_intelligence_stream(
             _global_seen.update(new_keys)
             _save_seen()   # always flush on clean stream completion
             _seen_unflushed = 0
+=======
+# ── Main extraction engine ────────────────────────────────────────────────────
 
 
-def list_available_models() -> List[str]:
+async def extract_text(
+    text: str,
+    model: str = "llama3.2",
+    cancel: Optional[CancelToken] = None,
+    # Fix #7: async callback for incremental graph updates
+    on_chunk: Optional[Callable[[ChunkResult], None]] = None,
+) -> tuple[list[Entity], list[Relationship]]:
+    """
+    Extract entities and relationships from *text* using *model*.
+
+    Parameters
+    ----------
+    text     : Raw input text.
+    model    : Ollama model name.
+    cancel   : CancelToken — call .cancel() from another coroutine to abort.
+    on_chunk : Optional async-compatible callback invoked after each chunk
+               completes, enabling incremental graph updates (Fix #7).
+
+    Returns
+    -------
+    (entities, relationships) deduplicated across all chunks.
+    """
+    if cancel is None:
+        cancel = CancelToken()
+
+    chunks = _sentence_chunks(text)
+    if not chunks:
+        return [], []
+
+    log.info(
+        "Extraction started: %d chunks, model=%s, parallel=%d",
+        len(chunks),
+        model,
+        OLLAMA_BATCH,
+    )
+
+    all_entities: list[Entity] = []
+    all_relationships: list[Relationship] = []
+    known_ids: list[str] = []
+
+    # Fix #1, #5: async client shared across all parallel chunk calls
+    async with httpx.AsyncClient() as client:
+        # Fix #5: process in waves of OLLAMA_BATCH parallel chunks
+        for wave_start in range(0, len(chunks), OLLAMA_BATCH):
+            cancel.raise_if_cancelled()
+            wave = chunks[wave_start : wave_start + OLLAMA_BATCH]
+            tasks = [
+                _extract_chunk(chunk, wave_start + i, model, cancel, client)
+                for i, chunk in enumerate(wave)
+            ]
+            results: list[ChunkResult] = await asyncio.gather(
+                *tasks, return_exceptions=True
+            )
+
+            for result in results:
+                if isinstance(result, Exception):
+                    log.warning("Chunk error (skipping): %s", result)
+                    continue
+
+                # Deduplicate entities via fuzzy matching
+                for ent in result.entities:
+                    canonical = _fuzzy_match(ent.id, known_ids)
+                    if canonical:
+                        ent.id = canonical
+                    else:
+                        known_ids.append(ent.id)
+                        all_entities.append(ent)
+
+                # Remap relationship IDs to canonical names
+                id_map = {
+                    raw: _fuzzy_match(raw, known_ids) or raw
+                    for raw in {r.from_id for r in result.relationships}
+                    | {r.to_id for r in result.relationships}
+                }
+                for rel in result.relationships:
+                    rel.from_id = id_map.get(rel.from_id, rel.from_id)
+                    rel.to_id = id_map.get(rel.to_id, rel.to_id)
+                    all_relationships.append(rel)
+
+                # Fix #7: incremental graph update after each chunk
+                if on_chunk:
+                    try:
+                        on_chunk(result)
+                    except Exception as cb_exc:
+                        log.warning("on_chunk callback error: %s", cb_exc)
+
+    log.info(
+        "Extraction complete: %d entities, %d relationships across %d chunks",
+        len(all_entities),
+        len(all_relationships),
+        len(chunks),
+    )
+    return all_entities, all_relationships
+>>>>>>> ce28496 (v3 initiate)
+
+
+# ── SSE streaming extraction (Fix #7 extended) ───────────────────────────────
+
+
+async def extract_stream(
+    text: str,
+    model: str = "llama3.2",
+    cancel: Optional[CancelToken] = None,
+) -> AsyncIterator[dict]:
+    """
+    Async generator yielding SSE-ready dicts as each chunk finishes.
+    Enables real-time frontend graph updates.
+    """
+    if cancel is None:
+        cancel = CancelToken()
+
+    chunks = _sentence_chunks(text)
+    total = len(chunks)
+    all_entities: list[Entity] = []
+    all_relationships: list[Relationship] = []
+    known_ids: list[str] = []
+
+    yield {"type": "start", "total_chunks": total, "model": model}
+
+    async with httpx.AsyncClient() as client:
+        for wave_start in range(0, total, OLLAMA_BATCH):
+            cancel.raise_if_cancelled()
+            wave = chunks[wave_start : wave_start + OLLAMA_BATCH]
+            tasks = [
+                _extract_chunk(chunk, wave_start + i, model, cancel, client)
+                for i, chunk in enumerate(wave)
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for result in results:
+                if isinstance(result, Exception):
+                    yield {"type": "error", "message": str(result)}
+                    continue
+
+                # Deduplicate
+                chunk_new_entities: list[dict] = []
+                for ent in result.entities:
+                    canonical = _fuzzy_match(ent.id, known_ids)
+                    if canonical:
+                        ent.id = canonical
+                    else:
+                        known_ids.append(ent.id)
+                        all_entities.append(ent)
+                        chunk_new_entities.append(
+                            {
+                                "id": ent.id,
+                                "group": ent.group,
+                                "confidence": ent.confidence,
+                                "attributes": ent.attributes,
+                            }
+                        )
+
+                id_map = {
+                    raw: _fuzzy_match(raw, known_ids) or raw
+                    for raw in {r.from_id for r in result.relationships}
+                    | {r.to_id for r in result.relationships}
+                }
+                chunk_new_rels: list[dict] = []
+                for rel in result.relationships:
+                    rel.from_id = id_map.get(rel.from_id, rel.from_id)
+                    rel.to_id = id_map.get(rel.to_id, rel.to_id)
+                    all_relationships.append(rel)
+                    chunk_new_rels.append(
+                        {
+                            "from": rel.from_id,
+                            "to": rel.to_id,
+                            "label": rel.label,
+                            "confidence": rel.confidence,
+                        }
+                    )
+
+                # Fix #7: yield incremental update per chunk
+                yield {
+                    "type": "chunk",
+                    "chunk_index": result.chunk_index,
+                    "elapsed": round(result.elapsed, 2),
+                    "new_entities": chunk_new_entities,
+                    "new_relationships": chunk_new_rels,
+                    "totals": {
+                        "entities": len(all_entities),
+                        "relationships": len(all_relationships),
+                        "chunks_done": result.chunk_index + 1,
+                        "chunks_total": total,
+                    },
+                }
+
+    yield {
+        "type": "done",
+        "total_entities": len(all_entities),
+        "total_relationships": len(all_relationships),
+        "total_chunks": total,
+    }
+
+
+# ── Model warm-up (Fix #8) ───────────────────────────────────────────────────
+
+
+async def warmup_model(model: str = "llama3.2") -> bool:
+    """
+    Send a minimal prompt to load the model weights into GPU/RAM.
+    Call once at server startup — avoids cold-start latency on first user request.
+    """
+    log.info("Warming up model: %s …", model)
     try:
+<<<<<<< HEAD
         resp = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=3)
         resp.raise_for_status()
         models = [m["name"] for m in resp.json().get("models", [])]
@@ -351,3 +725,22 @@ def check_ollama_health() -> Dict[str, Any]:
         }
     except Exception as e:
         return {"online": False, "models": [], "error": str(e)}
+=======
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{OLLAMA_HOST}/api/generate",
+                json={
+                    "model": model,
+                    "prompt": "ping",
+                    "stream": False,
+                    "options": {"num_predict": 1},
+                },
+                timeout=60.0,
+            )
+            resp.raise_for_status()
+        log.info("Model %s warmed up successfully.", model)
+        return True
+    except Exception as exc:
+        log.warning("Model warm-up failed for %s: %s", model, exc)
+        return False
+>>>>>>> ce28496 (v3 initiate)
