@@ -84,6 +84,8 @@ from utils import (
     retrieve_graph_context,
     save_graph,
 )
+:
+from contextlib import asynccontextmanager
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -159,6 +161,23 @@ def _check_rate(request: Request, max_req: int, window: float):
             headers={"Retry-After": str(int(window))},
         )
 
+@asynccontextmanager
+async def _lifespan(app):
+    print("🚀 Booting GOIES engine...")
+
+    # Start engine automatically
+    _continuous_state.update({
+        "active": True,
+        "cycle": 0,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "stopped_at": None,
+    })
+
+    asyncio.create_task(_continuous_loop())
+
+    yield
+
+    print("🛑 Shutting down GOIES...")
 
 # ── App ────────────────────────────────────────────────────────────────────────
 app = FastAPI(title="GOIES", version="4.2.0", docs_url="/api/docs", lifespan=_lifespan)
